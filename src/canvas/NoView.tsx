@@ -1,24 +1,36 @@
 import { useEffect, useRef, useState } from "react";
-import { ROTULO_NO, type No } from "../lib/tipos";
+import {
+  pedeAtencao,
+  ROTULO_ESTADO,
+  ROTULO_NO,
+  type EstadoSessao,
+  type No,
+} from "../lib/tipos";
+import { Conversa } from "./Conversa";
 
 interface Props {
   no: No;
   selecionado: boolean;
+  /** Só para nó de agente. `undefined` = ainda não abriu sessão. */
+  estadoSessao?: EstadoSessao;
   aoSelecionar: () => void;
   aoArrastar: (e: React.PointerEvent) => void;
   aoRedimensionar: (e: React.PointerEvent) => void;
   aoLigar: (e: React.PointerEvent) => void;
   aoRenomear: (nome: string) => void;
+  aoMudarEstadoSessao?: (estado: EstadoSessao) => void;
 }
 
 export function NoView({
   no,
   selecionado,
+  estadoSessao,
   aoSelecionar,
   aoArrastar,
   aoRedimensionar,
   aoLigar,
   aoRenomear,
+  aoMudarEstadoSessao,
 }: Props) {
   const [editando, setEditando] = useState(false);
 
@@ -59,10 +71,18 @@ export function NoView({
             {no.nome}
           </span>
         )}
+
+        {estadoSessao && (
+          <span
+            className={`sinal ${estadoSessao}${pedeAtencao(estadoSessao) ? " atencao" : ""}`}
+            title={ROTULO_ESTADO[estadoSessao]}
+            aria-label={`Estado: ${ROTULO_ESTADO[estadoSessao]}`}
+          />
+        )}
       </div>
 
       <div className="no-corpo">
-        <Corpo no={no} />
+        <Corpo no={no} aoMudarEstadoSessao={aoMudarEstadoSessao} />
       </div>
 
       {/* porta de ligação — arrastar daqui até outro nó cria um cabo */}
@@ -114,19 +134,19 @@ function CampoNome({ valor, aoConfirmar }: { valor: string; aoConfirmar: (v: str
 }
 
 /**
- * Conteúdo por tipo. No M0 são maquetes: mostram o lugar que a coisa vai
- * ocupar e a que marco ela pertence. Nada aqui finge estar funcionando.
+ * Conteúdo por tipo. Onde ainda é maquete, ela diz a que marco pertence —
+ * nada aqui finge estar funcionando. O agente saiu da maquete no M1.
  */
-function Corpo({ no }: { no: No }) {
+function Corpo({
+  no,
+  aoMudarEstadoSessao,
+}: {
+  no: No;
+  aoMudarEstadoSessao?: (estado: EstadoSessao) => void;
+}) {
   switch (no.tipo) {
     case "agente":
-      return (
-        <div className="maquete conversa">
-          <div className="bolha agente">Pronto para começar.</div>
-          <div className="bolha usuario">…</div>
-          <span className="marco">Face conversa · M1</span>
-        </div>
-      );
+      return <Conversa no={no} aoMudarEstado={aoMudarEstadoSessao} />;
     case "nota":
       return (
         <div className="maquete nota">

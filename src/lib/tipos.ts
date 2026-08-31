@@ -83,3 +83,128 @@ export const ROTULO_NO: Record<TipoNo, string> = {
   portal: "Portal",
   forma: "Forma",
 };
+
+// =========================================================== M1: sessões ===
+
+export type Adaptador = "claude" | "codex" | "pty" | "falso";
+export type PapelMensagem = "usuario" | "agente" | "sistema" | "no";
+export type Aprovacao = "automatica" | "pendente" | "aprovada" | "negada";
+
+/**
+ * Repare no que não está aqui: `token`. O segredo que o servidor MCP usa para
+ * saber qual nó está chamando nunca atravessa a fronteira — ver
+ * ESPECIFICACAO.md §4 e o teste `o_token_do_mcp_nunca_sai_no_json_da_sessao`.
+ */
+export interface Sessao {
+  id: string;
+  node_id: string;
+  adaptador: Adaptador;
+  sessao_externa_id: string | null;
+  estado: EstadoSessao;
+  custo_total: number;
+  iniciada_em: number;
+  ultimo_sinal_em: number;
+}
+
+export interface Mensagem {
+  id: string;
+  session_id: string;
+  papel: PapelMensagem;
+  origem_node: string | null;
+  conteudo: string;
+  tokens: number;
+  custo: number;
+  trace_id: string | null;
+  criado_em: number;
+}
+
+export interface ChamadaFerramenta {
+  id: string;
+  session_id: string;
+  ferramenta: string;
+  argumentos: Record<string, unknown>;
+  resultado: unknown | null;
+  erro: string | null;
+  aprovacao: Aprovacao;
+  decidido_por: string | null;
+  criado_em: number;
+}
+
+/** Entrada e saída separadas: elas custam preços diferentes. */
+export interface Uso {
+  tokens_entrada: number;
+  tokens_saida: number;
+  /** Em dólar — é a moeda em que a API cobra. `NaN` quando o modelo é desconhecido. */
+  custo_usd: number;
+}
+
+/** União discriminada por `tipo`, espelhando `#[serde(tag = "tipo")]` no Rust. */
+export type EventoAgente =
+  | { tipo: "sessao_iniciada"; id_externo: string; modelo: string; ferramentas: string[] }
+  | { tipo: "texto_parcial"; delta: string }
+  | { tipo: "raciocinando"; resumo: string }
+  | { tipo: "ferramenta_pedida"; id: string; nome: string; argumentos: Record<string, unknown> }
+  | { tipo: "ferramenta_concluida"; id: string; resultado: unknown | null; erro: string | null }
+  | { tipo: "turno_concluido"; texto_final: string; uso: Uso }
+  | { tipo: "precisa_humano"; pergunta: string }
+  | { tipo: "erro"; mensagem: string; recuperavel: boolean };
+
+export interface CustoDoNo {
+  node_id: string;
+  custo: number;
+}
+
+/** Payloads dos eventos do núcleo. Nomes em ESPECIFICACAO.md §3. */
+export interface EventoSessao {
+  tipo: "sessao_evento";
+  session_id: string;
+  evento: EventoAgente;
+}
+
+export interface EventoEstado {
+  tipo: "sessao_estado";
+  session_id: string;
+  node_id: string;
+  estado: EstadoSessao;
+  pede_atencao: boolean;
+}
+
+export interface EventoCusto {
+  tipo: "custo_atualizado";
+  workspace_id: string;
+  total: number;
+  por_no: CustoDoNo[];
+}
+
+export const ROTULO_ESTADO: Record<EstadoSessao, string> = {
+  ocioso: "pronto",
+  pensando: "pensando",
+  aguardando_aprovacao: "esperando você aprovar",
+  aguardando_humano: "esperando sua resposta",
+  aguardando_no: "esperando outro nó",
+  erro: "deu problema",
+};
+
+/** Só estes acendem o ponto no cabeçalho. Pensando não é pedido de socorro. */
+export function pedeAtencao(e: EstadoSessao): boolean {
+  return e === "aguardando_aprovacao" || e === "aguardando_humano" || e === "erro";
+}
+
+const MOEDA = new Intl.NumberFormat("pt-BR", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  // Um turno barato custa frações de centavo. Arredondar para dois zeraria
+  // tudo e o painel de custo viraria enfeite.
+  maximumFractionDigits: 4,
+});
+
+/**
+ * Custo em dólar, que é como a API cobra. Converter para real exige uma
+ * cotação, e cotação chumbada envelhece mal — fica para quando houver de onde
+ * buscá-la. Modelo sem preço na tabela vira "—", nunca zero: zero mentiria.
+ */
+export function formatarCusto(usd: number): string {
+  if (!Number.isFinite(usd)) return "—";
+  return MOEDA.format(usd);
+}

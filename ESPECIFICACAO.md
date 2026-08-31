@@ -5,7 +5,10 @@ Companheiro do `ARQUITETURA.md`. Aquele diz **o quê** e **por quê**; este diz
 abrir este arquivo e escrever a próxima função sem inventar nome, caminho ou
 formato.
 
-Estado atual: **M0 pronto e testado.** M1 em diante ainda é contrato, não código.
+Estado atual: **M0 pronto e testado. M1 quase todo pronto** — sessão, turno,
+custo, face conversa e face terminal funcionam ponta a ponta contra o adaptador
+falso. Falta o adaptador Claude, e é ele que separa "conversa com roteiro" de
+"conversa com modelo". M2 em diante ainda é contrato, não código.
 
 ---
 
@@ -24,10 +27,13 @@ mutirao/
 ├── nucleo/                 CRATE PURO — sem Tauri, sem UI
 │   ├── Cargo.toml
 │   ├── migrations/
-│   │   └── 001_inicial.sql esquema completo, executável
+│   │   ├── 001_inicial.sql        esquema completo, executável
+│   │   └── 002_adaptador_falso.sql  'falso' no CHECK de session.adaptador
 │   └── src/
-│       ├── lib.rs          fachada + 23 testes
-│       ├── modelo.rs       tipos de domínio e máquina de estados
+│       ├── lib.rs          fachada + 43 testes
+│       ├── modelo.rs       tipos de domínio, máquina de estados, preços
+│       ├── agente.rs       trait AgenteAdapter, Roteiro, adaptador falso
+│       ├── orquestrador.rs turno, bomba de eventos, custo
 │       ├── db.rs           migrations e todo o acesso a dados
 │       └── erro.rs         Erro, códigos estáveis
 │
@@ -52,11 +58,13 @@ mutirao/
 │   └── canvas/
 │       ├── viewport.ts     matemática de pan/zoom, enquadrar
 │       ├── NoView.tsx      um nó
+│       ├── Conversa.tsx    face conversa e face terminal
 │       └── Cabos.tsx       SVG dos cabos
 │
 └── testes-ui/
-    ├── fumaca.mjs          10 verificações no Chromium
-    └── canvas.png          retrato gerado pelo teste
+    ├── fumaca.mjs          27 verificações no Chromium
+    ├── canvas.png          retrato do canvas em repouso
+    └── conversa.png        retrato de um turno inteiro
 ```
 
 **Regra de ouro:** nenhuma regra de negócio em `src-tauri/`. Se um comando
@@ -87,9 +95,13 @@ npm run app                 # app de verdade (tauri dev)
 npm run build               # typecheck + build do front
 npm run app:build           # instalador MSI/NSIS
 
-cargo test -p nucleo        # 23 testes do núcleo
+cargo test -p nucleo        # 43 testes do núcleo
 node testes-ui/fumaca.mjs   # teste de fumaça da interface
 ```
+
+O teste de fumaça usa o Chromium que vem com o Playwright. Em máquina onde ele
+não está onde o Playwright espera — CI, contêiner — aponte o binário:
+`CHROMIUM_BIN=/caminho/para/chromium node testes-ui/fumaca.mjs`.
 
 Os ícones já estão em `src-tauri/icons/` (marca provisória: três nós ligados).
 `tauri::generate_context!` os exige em tempo de compilação — sem eles o build
@@ -134,25 +146,49 @@ detalhe vai para o stderr.
 | `remover_no` | `id` | — | `nao_encontrado` |
 | `criar_cabo` | `workspaceId, deNode, paraNode, tipo` | `Cabo` | `invalido` (auto-ligação, duplicado) |
 | `remover_cabo` | `id` | — | `nao_encontrado` |
+| `abrir_sessao` | `nodeId, adaptador` | `Sessao` | `nao_encontrado`, `invalido` (nó não é agente) |
+| `sessao_do_no` | `nodeId` | `Sessao \| null` | — |
+| `enviar_mensagem` | `sessionId, texto` | — | `invalido` (vazia, turno em andamento), `nao_encontrado` |
+| `cancelar_turno` | `sessionId` | — | `nao_encontrado` |
+| `historico` | `sessionId, limite` | `Mensagem[]` | — |
+| `acoes_da_sessao` | `sessionId` | `ChamadaFerramenta[]` | — |
+| `custo_do_workspace` | `workspaceId` | `{ total, por_no }` | — |
 
 `abrir_workspace` devolve o estado inteiro numa viagem só. Abrir um canvas não
 pode custar três chamadas de IPC.
 
-### Eventos Rust → front (M1 em diante)
+`abrir_sessao` devolve a sessão que já existir naquele nó. Reabrir o app
+continua a conversa; não começa outra.
 
-Ainda não emitidos. Nomes reservados, payload definido:
+### Eventos Rust → front
 
-| Evento | Payload | Quando |
-|---|---|---|
-| `sessao:evento` | `{ sessionId, evento: EventoAgente }` | a cada evento do adaptador |
-| `sessao:estado` | `{ sessionId, estado, pedeAtencao }` | mudança na máquina de estados |
-| `aprovacao:pedida` | `{ toolCallId, sessionId, ferramenta, argumentos }` | ferramenta exige aprovação |
-| `aprovacao:decidida` | `{ toolCallId, aprovada }` | usuário decidiu |
-| `no:mensagem` | `{ deNode, paraNode, traceId }` | mensagem entre nós, para animar o cabo |
-| `custo:atualizado` | `{ workspaceId, total, porNo }` | fim de turno |
+Emitidos desde o M1. **Payload em `snake_case`**, como todo o resto que
+atravessa a fronteira — a tabela antiga dizia `sessionId`, e manter duas
+convenções de nome no mesmo canal é exatamente a "duas verdades" que a §10
+proíbe. Todo payload carrega também `tipo`, para o front discriminar sem
+depender só do nome do evento.
+
+| Evento | Payload | Quando | Estado |
+|---|---|---|---|
+| `sessao:evento` | `{ tipo, session_id, evento: EventoAgente }` | a cada evento do adaptador | pronto |
+| `sessao:estado` | `{ tipo, session_id, node_id, estado, pede_atencao }` | mudança na máquina de estados | pronto |
+| `custo:atualizado` | `{ tipo, workspace_id, total, por_no }` | fim de turno | pronto |
+| `aprovacao:pedida` | `{ tool_call_id, session_id, ferramenta, argumentos }` | ferramenta exige aprovação | M2 |
+| `aprovacao:decidida` | `{ tool_call_id, aprovada }` | usuário decidiu | M2 |
+| `no:mensagem` | `{ de_node, para_node, trace_id }` | mensagem entre nós, para animar o cabo | M3 |
 
 Regra: evento **notifica**, não carrega o histórico. O front pede o que
 precisa por comando. Isso evita que a fronteira IPC vire um firehose.
+
+**Ordem que não é acidental:** `sessao:evento` sai *antes* de o núcleo gravar o
+efeito daquele evento. É de propósito — quem emite `sessao:estado` é a
+gravação, e a interface reabilita o campo de escrita ao ver o estado voltar
+para `ocioso`. Aplicando primeiro, o campo destravaria um instante antes de a
+resposta aparecer, e o turno pareceria terminar vazio.
+
+A consequência para quem escuta: **não reaja a um evento relendo o banco**, que
+ainda não tem o que você procura. Monte a partir do próprio evento. A face
+conversa faz assim, e a releitura na montagem do nó reconcilia.
 
 ---
 
@@ -335,13 +371,26 @@ Nenhuma palavra de Git aparece. Binário não faz merge: escolhe-se um lado.
 
 | Camada | Como | Cobre |
 |---|---|---|
-| Núcleo | `cargo test -p nucleo` — 23 testes | migrations, CRUD, escopo dos cabos, validação, máquina de estados, contrato de serialização |
-| Interface | `node testes-ui/fumaca.mjs` — 10 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover, console limpo |
-| Agentes (M1+) | adaptador falso, roteirizado | fluxo de turno sem gastar token |
+| Núcleo | `cargo test -p nucleo` — 43 testes | migrations, CRUD, escopo dos cabos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token |
+| Interface | `node testes-ui/fumaca.mjs` — 27 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; e um turno de ponta a ponta: pergunta, card de ação, resposta, custo, face terminal, parar |
 
-O adaptador falso do M1 é obrigatório, não conveniência: testar orquestração
-contra a API de verdade é lento, caro e não-determinístico. Ele lê um roteiro
-(`{ atraso_ms, eventos: [...] }`) e emite os mesmos `EventoAgente`.
+O adaptador falso é obrigatório, não conveniência: testar orquestração contra a
+API de verdade é lento, caro e não-determinístico. Ele lê um roteiro
+(`{ atraso_ms, eventos: [...] }`) e emite os mesmos `EventoAgente`. Existe em
+duas encarnações — `nucleo/src/agente.rs` para o app e os testes do núcleo, e
+um espelho em `src/lib/ipc.ts` para o modo navegador, que não tem Rust por
+baixo. A duplicação é conhecida e vale o preço: sem ela não dá para desenvolver
+nem testar a interface fora do Tauri.
+
+Três testes valem por si, porque cobrem coisa que falha calada:
+
+- `o_token_do_mcp_nunca_sai_no_json_da_sessao` — o segredo do §4 atravessando a
+  fronteira seria a falha de segurança mais barata de cometer e a mais difícil
+  de notar.
+- `adaptador_que_cala_no_meio_deixa_o_no_em_erro_e_nao_pensando` — nó preso em
+  "pensando" não pede atenção, não aceita turno novo e não explica nada.
+- `migration_002_reconstroi_session_sem_perder_os_filhos` — reconstruir tabela
+  com FK ligada apaga os filhos por CASCADE sem erro nenhum.
 
 Um teste que passou merece um comentário no código quando o motivo dele não é
 óbvio. Dois exemplos já no repositório: o `overflow` do nó, que tornava a porta
@@ -362,6 +411,30 @@ continuam em DOM, porque texto selecionável e acessível não se desenha na GPU
 
 **Gravação por gesto, não por frame.** Arrastar não grava a cada movimento; o
 banco recebe a posição final no `pointerup`. O viewport usa debounce de 400 ms.
+
+**Trait do adaptador mais estreito que o esboço.** O `ARQUITETURA.md §5` previa
+`iniciar`, `enviar`, `cancelar`, `retomar` e `eventos`. O implementado tem dois
+métodos: `turno(texto) -> Receiver<EventoAgente>` e `cancelar()`.
+
+- `enviar` e `eventos` viraram um só porque um turno é sempre pergunta e fluxo
+  de resposta; separados, só sobrava a chance de chamar na ordem errada.
+- `iniciar` e `retomar` saíram do trait e viraram trabalho da `Fabrica`, que
+  recebe o `sessao_externa_id` no contexto e decide entre começar e continuar.
+  Quem cria a sessão não deveria ser quem a conduz.
+- `Stream` virou `std::sync::mpsc::Receiver`. O núcleo é crate puro e não tem
+  runtime assíncrono; um canal da biblioteca padrão com uma thread por turno
+  faz o mesmo sem arrastar tokio para dentro do modelo de domínio.
+
+**Custo em dólar, não em real.** A maquete do §7 mostrava "R$ 0,42". A API cobra
+em dólar, e converter exige uma cotação — cotação chumbada envelhece mal e
+cotação buscada é serviço externo, que é decisão de produto. Até haver de onde
+buscá-la, a interface mostra `US$`. Modelo sem preço na tabela mostra `—`,
+nunca zero: zero mentiria e sumiria do painel.
+
+**Um turno por vez, sem fila ainda.** O `ARQUITETURA.md §5` fala em fila por nó.
+No M1 quem tenta falar durante um turno leva recusa com mensagem clara, e a
+interface trava o campo. A fila em ordem é do M3, quando existir mais de um
+remetente possível — antes disso ela não teria o que enfileirar.
 
 ---
 
@@ -463,9 +536,29 @@ Nada que trave o M1. Ficam para o dia da divulgação:
 ## 12. Onde parar e olhar
 
 Ao terminar cada marco, a pergunta não é "implementei?" e sim o critério de
-pronto do `ARQUITETURA.md`. O do M0 era: *arrasto três caixas, fecho o app,
-reabro e está tudo no lugar.* Isso funciona.
+pronto do `ARQUITETURA.md`.
 
-O próximo — M1 — é: *peço "resuma este PDF" e vejo a resposta chegando em
-bolhas, com o custo ao lado.* Comece pelo adaptador Claude e pelo adaptador
-falso no mesmo dia; sem o falso, cada iteração custa dinheiro e paciência.
+- **M0** — *arrasto três caixas, fecho o app, reabro e está tudo no lugar.*
+  Funciona.
+- **M1** — *peço "resuma este PDF" e vejo a resposta chegando em bolhas, com o
+  custo ao lado.* Funciona **contra o adaptador falso**, e o teste de fumaça
+  mede exatamente isso. Contra um modelo de verdade, ainda não: falta o
+  adaptador Claude.
+
+### O que falta no M1
+
+1. **Adaptador Claude.** Um `AgenteAdapter` que sobe o Agent SDK num sidecar
+   Node e traduz a saída para `EventoAgente`. Tudo à volta já existe: a
+   `Fabrica` é o único lugar que precisa mudar, e o `ContextoSessao` já carrega
+   pasta, token do MCP e `sessao_externa_id`. Confira a ordem de resolução de
+   credencial na documentação do SDK ao escrever — não deduza.
+2. **Retomada de verdade.** A conversa já sobrevive ao fechamento: fica no
+   SQLite e volta ao reabrir o nó, e `sessao_externa_id` é gravado. Retomar a
+   sessão *do agente* depende do adaptador — é `--resume` no Claude Code, e só
+   dá para provar com ele no lugar.
+3. **Face terminal com histórico.** Hoje ela mostra o fluxo cru a partir do
+   turno seguinte, porque o fluxo não é gravado — só o que ele produz. Se valer
+   guardar, é uma tabela nova, e aí é decisão, não esquecimento.
+
+Ao escrever o adaptador Claude, escreva um roteiro novo para o falso no mesmo
+dia. É ele que mantém o custo de cada iteração em zero.

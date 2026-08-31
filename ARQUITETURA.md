@@ -127,6 +127,10 @@ partitura(id, workspace_id, nome, snapshot_json)
 
 ## 5. Runtime de agente
 
+> Esboço original. O implementado é mais estreito — dois métodos em vez de
+> cinco, e `Receiver` em vez de `Stream`. Ver `nucleo/src/agente.rs` e a
+> justificativa em `ESPECIFICACAO.md §9`.
+
 ```rust
 trait AgenteAdapter {
     fn iniciar(pasta, papel, mcp_config) -> SessionId;
@@ -270,6 +274,11 @@ Estimativa para um desenvolvedor com apoio pesado de agentes.
 - Cancelar turno, retomar sessão depois de fechar o app, custo por turno visível
 
 **Pronto quando:** peço "resuma este PDF" e vejo a resposta chegando em bolhas, com o custo ao lado.
+
+**Onde está:** o critério passa contra o adaptador falso, medido pelo teste de fumaça — sessão,
+turno, cancelamento, cards de ação, custo por turno e por workspace, face conversa e face
+terminal. Falta o adaptador Claude, e com ele a retomada da sessão externa. A lista exata do que
+sobra está em `ESPECIFICACAO.md §12`.
 
 ### M2 — Substrato de trabalho · 2 semanas
 - Pasta do workspace, nó de árvore de arquivos, notas Markdown editáveis no canvas

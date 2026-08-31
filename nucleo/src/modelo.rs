@@ -180,6 +180,18 @@ impl EstadoSessao {
         }
     }
 
+    pub fn do_texto(s: &str) -> Option<EstadoSessao> {
+        Some(match s {
+            "ocioso" => EstadoSessao::Ocioso,
+            "pensando" => EstadoSessao::Pensando,
+            "aguardando_aprovacao" => EstadoSessao::AguardandoAprovacao,
+            "aguardando_humano" => EstadoSessao::AguardandoHumano,
+            "aguardando_no" => EstadoSessao::AguardandoNo,
+            "erro" => EstadoSessao::Erro,
+            _ => return None,
+        })
+    }
+
     /// O ponto vermelho do nó: o usuário precisa agir.
     pub fn pede_atencao(&self) -> bool {
         matches!(
@@ -207,4 +219,276 @@ impl EstadoSessao {
             (a, b) => a == &b,                     // permanecer é sempre válido
         }
     }
+
+    /// O nó aceita um turno novo? Só quem está parado aceita — é aqui que mora
+    /// a regra "um turno por vez por nó" do `ARQUITETURA.md §5`.
+    pub fn aceita_turno(&self) -> bool {
+        matches!(self, EstadoSessao::Ocioso | EstadoSessao::Erro)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Adaptador {
+    Claude,
+    Codex,
+    Pty,
+    /// Roteiro em vez de modelo. Existe para testar orquestração sem gastar
+    /// token, e é gravado como si mesmo — ver `migrations/002`.
+    Falso,
+}
+
+impl Adaptador {
+    pub fn como_texto(&self) -> &'static str {
+        match self {
+            Adaptador::Claude => "claude",
+            Adaptador::Codex => "codex",
+            Adaptador::Pty => "pty",
+            Adaptador::Falso => "falso",
+        }
+    }
+
+    pub fn do_texto(s: &str) -> Option<Adaptador> {
+        Some(match s {
+            "claude" => Adaptador::Claude,
+            "codex" => Adaptador::Codex,
+            "pty" => Adaptador::Pty,
+            "falso" => Adaptador::Falso,
+            _ => return None,
+        })
+    }
+}
+
+/// Uma sessão de agente, do jeito que o front pode ver.
+///
+/// Repare no que **não** está aqui: `session.token`, o segredo que o servidor
+/// MCP usa para descobrir qual nó está chamando (`ESPECIFICACAO.md §4`). Ele
+/// mora só no banco e no processo do agente. Se um dia alguém precisar dele na
+/// interface, a resposta é não — um token que chega ao front chega também a
+/// qualquer coisa que rode no front.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Sessao {
+    pub id: String,
+    pub node_id: String,
+    pub adaptador: Adaptador,
+    pub sessao_externa_id: Option<String>,
+    pub estado: EstadoSessao,
+    pub custo_total: f64,
+    pub iniciada_em: Instante,
+    pub ultimo_sinal_em: Instante,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PapelMensagem {
+    Usuario,
+    Agente,
+    Sistema,
+    /// Veio de outro nó pelo cabo. `origem_node` diz de qual. M3 usa; o M1
+    /// já grava para o histórico não precisar de migration depois.
+    No,
+}
+
+impl PapelMensagem {
+    pub fn como_texto(&self) -> &'static str {
+        match self {
+            PapelMensagem::Usuario => "usuario",
+            PapelMensagem::Agente => "agente",
+            PapelMensagem::Sistema => "sistema",
+            PapelMensagem::No => "no",
+        }
+    }
+
+    pub fn do_texto(s: &str) -> Option<PapelMensagem> {
+        Some(match s {
+            "usuario" => PapelMensagem::Usuario,
+            "agente" => PapelMensagem::Agente,
+            "sistema" => PapelMensagem::Sistema,
+            "no" => PapelMensagem::No,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Mensagem {
+    pub id: String,
+    pub session_id: String,
+    pub papel: PapelMensagem,
+    pub origem_node: Option<String>,
+    pub conteudo: String,
+    pub tokens: i64,
+    pub custo: f64,
+    pub trace_id: Option<String>,
+    pub criado_em: Instante,
+}
+
+/// Uma ação do agente, do jeito que vira card na face conversa.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChamadaFerramenta {
+    pub id: String,
+    pub session_id: String,
+    pub ferramenta: String,
+    pub argumentos: serde_json::Value,
+    pub resultado: Option<serde_json::Value>,
+    pub erro: Option<String>,
+    pub aprovacao: Aprovacao,
+    pub decidido_por: Option<String>,
+    pub criado_em: Instante,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Aprovacao {
+    Automatica,
+    Pendente,
+    Aprovada,
+    Negada,
+}
+
+impl Aprovacao {
+    pub fn como_texto(&self) -> &'static str {
+        match self {
+            Aprovacao::Automatica => "automatica",
+            Aprovacao::Pendente => "pendente",
+            Aprovacao::Aprovada => "aprovada",
+            Aprovacao::Negada => "negada",
+        }
+    }
+
+    pub fn do_texto(s: &str) -> Option<Aprovacao> {
+        Some(match s {
+            "automatica" => Aprovacao::Automatica,
+            "pendente" => Aprovacao::Pendente,
+            "aprovada" => Aprovacao::Aprovada,
+            "negada" => Aprovacao::Negada,
+            _ => return None,
+        })
+    }
+}
+
+// ------------------------------------------------------------------- custo
+
+/// Consumo de um turno. Entrada e saída separadas porque custam preços
+/// diferentes — juntar os dois num número só torna o custo incalculável.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct Uso {
+    pub tokens_entrada: i64,
+    pub tokens_saida: i64,
+    /// Em dólar. É a moeda em que a API cobra; converter para real exige uma
+    /// cotação, que é decisão de produto e não do núcleo.
+    pub custo_usd: f64,
+}
+
+impl Uso {
+    pub fn tokens(&self) -> i64 {
+        self.tokens_entrada + self.tokens_saida
+    }
+}
+
+/// Preço por milhão de tokens (entrada, saída), em dólar.
+///
+/// Tabela pública da Anthropic, conferida em 31/08/2026. Fica no núcleo porque
+/// é o número que o usuário vê no canto do nó, e um preço errado é pior que
+/// nenhum: some a confiança no painel inteiro. Ao acrescentar modelo, confira
+/// a tabela vigente — não deduza pelo nome.
+pub fn preco_por_milhao(modelo: &str) -> (f64, f64) {
+    match modelo {
+        m if m.starts_with("claude-opus-5") => (5.0, 25.0),
+        m if m.starts_with("claude-sonnet-5") => (2.0, 10.0),
+        m if m.starts_with("claude-haiku-4-5") => (1.0, 5.0),
+        // Modelo desconhecido não vira custo zero: zero mente e some do painel.
+        // Sem preço, o front mostra "—" e o usuário sabe que não sabemos.
+        _ => (f64::NAN, f64::NAN),
+    }
+}
+
+pub fn custo_do_uso(modelo: &str, tokens_entrada: i64, tokens_saida: i64) -> f64 {
+    let (entrada, saida) = preco_por_milhao(modelo);
+    (tokens_entrada as f64 * entrada + tokens_saida as f64 * saida) / 1_000_000.0
+}
+
+// ---------------------------------------------------------------- eventos
+
+/// O que um adaptador reporta. Todo adaptador — Claude, Codex, falso — traduz
+/// a saída nativa para isto, e o resto do sistema só conhece esta forma.
+///
+/// `tipo` como discriminante: vira união discriminada em TypeScript sem
+/// nenhuma tradução manual na fronteira.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "tipo", rename_all = "snake_case")]
+pub enum EventoAgente {
+    SessaoIniciada {
+        id_externo: String,
+        modelo: String,
+        ferramentas: Vec<String>,
+    },
+    TextoParcial {
+        delta: String,
+    },
+    Raciocinando {
+        resumo: String,
+    },
+    FerramentaPedida {
+        id: String,
+        nome: String,
+        argumentos: serde_json::Value,
+    },
+    FerramentaConcluida {
+        id: String,
+        resultado: Option<serde_json::Value>,
+        erro: Option<String>,
+    },
+    /// O sino. Com stream estruturado o fim do turno é evento explícito, não
+    /// adivinhação sobre o texto do terminal — é a razão de ser da Decisão 1.
+    TurnoConcluido {
+        texto_final: String,
+        uso: Uso,
+    },
+    PrecisaHumano {
+        pergunta: String,
+    },
+    Erro {
+        mensagem: String,
+        recuperavel: bool,
+    },
+}
+
+impl EventoAgente {
+    /// Eventos que encerram o turno. O bombeamento para de escutar depois de
+    /// um destes; sem isso a thread do turno nunca termina.
+    pub fn encerra_turno(&self) -> bool {
+        matches!(self, EventoAgente::TurnoConcluido { .. } | EventoAgente::Erro { .. })
+    }
+}
+
+/// O que o núcleo conta para a interface. Nomes de evento e formato em
+/// `ESPECIFICACAO.md §3` — o `src-tauri` só mapeia variante para nome.
+///
+/// Regra: evento **notifica**, não carrega histórico. Quem quiser a conversa
+/// inteira pede por comando. Sem isso a fronteira IPC vira mangueira de bombeiro.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "tipo", rename_all = "snake_case")]
+pub enum EventoNucleo {
+    SessaoEvento {
+        session_id: String,
+        evento: EventoAgente,
+    },
+    SessaoEstado {
+        session_id: String,
+        node_id: String,
+        estado: EstadoSessao,
+        pede_atencao: bool,
+    },
+    CustoAtualizado {
+        workspace_id: String,
+        total: f64,
+        por_no: Vec<CustoDoNo>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustoDoNo {
+    pub node_id: String,
+    pub custo: f64,
 }

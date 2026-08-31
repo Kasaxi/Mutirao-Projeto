@@ -387,6 +387,257 @@ button:focus-visible,
   height: 100%;
 }
 
+/* -------------------------------------------------------- face conversa */
+
+/* O nó de agente entrega o corpo inteiro para a conversa: a lista precisa
+   encostar nas bordas para rolar direito, e o respiro vem de dentro. */
+.no-agente .no-corpo {
+  padding: 0;
+}
+
+.conversa-viva {
+  display: grid;
+  grid-template-rows: 26px 1fr auto;
+  height: 100%;
+  min-height: 0; /* sem isto a lista não rola: o grid estica o filho */
+  font-size: 12.5px;
+}
+
+.conversa-abas {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--borda);
+  background: var(--fundo);
+}
+
+.aba {
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  background: none;
+  border: none;
+  border-radius: 2px;
+  color: var(--texto-apagado);
+}
+
+.aba:hover:not(:disabled) {
+  color: var(--texto-fraco);
+  border: none;
+}
+
+.aba.ativa {
+  color: var(--acento);
+  background: var(--acento-fraco);
+}
+
+.conversa-estado {
+  margin-left: auto;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--texto-apagado);
+}
+
+.conversa-lista,
+.conversa-cru {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+  padding: 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.conversa-cru {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--texto-fraco);
+  gap: 2px;
+}
+
+.cru-linha {
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-left: 2px solid var(--borda);
+  padding-left: 6px;
+}
+
+.bolha {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--texto);
+}
+
+.bolha.escrevendo::after {
+  content: "▍";
+  color: var(--acento);
+  animation: piscar 1s steps(2) infinite;
+}
+
+@keyframes piscar {
+  50% {
+    opacity: 0;
+  }
+}
+
+.bolha-custo {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--texto-apagado);
+}
+
+.pensamento {
+  font-size: 11.5px;
+  font-style: italic;
+  color: var(--texto-apagado);
+  padding-left: 4px;
+  border-left: 2px solid var(--borda-forte);
+}
+
+/* Ação como card, não como linha de log: log é para quem depura, card é para
+   quem precisa saber o que mexeram no arquivo. */
+.card-acao {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 11.5px;
+  background: var(--fundo);
+  border: 1px solid var(--borda);
+  border-left: 2px solid var(--cabo-le);
+  border-radius: 3px;
+  padding: 5px 8px;
+}
+
+.card-acao.falhou {
+  border-left-color: var(--perigo);
+}
+
+.acao-verbo {
+  color: var(--texto-fraco);
+}
+
+.acao-alvo {
+  color: var(--texto);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.acao-estado {
+  margin-left: auto;
+  color: var(--texto-apagado);
+  font-size: 10.5px;
+}
+
+.aviso-sistema {
+  font-size: 11px;
+  text-align: center;
+  color: var(--texto-apagado);
+  border-top: 1px dashed var(--borda);
+  border-bottom: 1px dashed var(--borda);
+  padding: 4px 0;
+}
+
+.conversa-rodape {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px;
+  border-top: 1px solid var(--borda);
+  background: var(--superficie-2);
+  border-radius: 0 0 4px 4px;
+}
+
+.conversa-campo {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--texto);
+  background: var(--fundo);
+  border: 1px solid var(--borda);
+  border-radius: 3px;
+  padding: 5px 8px;
+  resize: none;
+  max-height: 72px;
+}
+
+.conversa-campo:focus {
+  outline: none;
+  border-color: var(--acento);
+}
+
+.conversa-campo:disabled {
+  color: var(--texto-apagado);
+}
+
+.conversa-custo {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--texto-fraco);
+  white-space: nowrap;
+}
+
+.conversa-botao {
+  font-size: 11.5px;
+  padding: 4px 10px;
+  flex-shrink: 0;
+}
+
+.conversa-botao.parar {
+  color: var(--perigo);
+  border-color: var(--perigo);
+}
+
+.conversa-erro {
+  font-size: 11.5px;
+  color: var(--perigo);
+  padding: 6px 9px;
+  cursor: pointer;
+}
+
+/* O ponto do cabeçalho. Só acende para o que precisa de gente: pensando não
+   é pedido de socorro. */
+.sinal {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--borda-forte);
+}
+
+.sinal.pensando {
+  background: var(--acento);
+  animation: respirar 1.4s ease-in-out infinite;
+}
+
+.sinal.atencao {
+  background: var(--perigo);
+  box-shadow: 0 0 0 3px rgba(217, 138, 120, 0.18);
+}
+
+@keyframes respirar {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.selo.alerta {
+  color: var(--perigo);
+  border-color: var(--perigo);
+  background: transparent;
+}
+
+.custo-total {
+  font-variant-numeric: tabular-nums;
+  color: var(--texto-fraco);
+}
+
 /* ---------------------------------------------------------------- rodapé */
 
 .rodape {

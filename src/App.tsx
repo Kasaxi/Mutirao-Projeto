@@ -10,8 +10,17 @@ import {
   type Tela,
 } from "./canvas/viewport";
 import { adiar } from "./lib/adiar";
-import { ipc, modoNavegador } from "./lib/ipc";
-import { ehErroIpc, type EstadoCanvas, type No, type TipoNo, type Viewport } from "./lib/tipos";
+import { ADAPTADOR_ATUAL, escutar, ipc, modoNavegador } from "./lib/ipc";
+import {
+  ehErroIpc,
+  formatarCusto,
+  type EstadoCanvas,
+  type EstadoSessao,
+  type EventoCusto,
+  type No,
+  type TipoNo,
+  type Viewport,
+} from "./lib/tipos";
 
 type Arrasto =
   | { tipo: "pan"; inicio: Tela; vpInicial: Viewport }
@@ -28,6 +37,10 @@ export default function App() {
   const [selecionado, setSelecionado] = useState<string | null>(null);
   const [arrasto, setArrasto] = useState<Arrasto | null>(null);
   const [aviso, setAviso] = useState<string | null>(null);
+  // Estado de sessão por nó, só para o cabeçalho desenhar o ponto de atenção.
+  // Quem sabe da conversa é cada <Conversa>; aqui mora só o resumo.
+  const [estadosSessao, setEstadosSessao] = useState<Record<string, EstadoSessao>>({});
+  const [custoTotal, setCustoTotal] = useState(0);
 
   const areaRef = useRef<HTMLDivElement>(null);
 
@@ -80,6 +93,35 @@ export default function App() {
   }, [vp, estado, gravarViewport]);
 
   const nosPorId = useMemo(() => new Map((estado?.nos ?? []).map((n) => [n.id, n])), [estado]);
+
+  const registrarEstadoSessao = useCallback((nodeId: string, novo: EstadoSessao) => {
+    // Devolver o mesmo objeto quando nada muda evita render em cascata: o
+    // callback que dispara isto é recriado a cada render do App.
+    setEstadosSessao((m) => (m[nodeId] === novo ? m : { ...m, [nodeId]: novo }));
+  }, []);
+
+  // O custo do workspace inteiro, para a barra. Chega por evento no fim de
+  // cada turno; a leitura inicial cobre o que já foi gasto em sessões antigas.
+  useEffect(() => {
+    if (!estado) return;
+    const ws = estado.workspace.id;
+    let vivo = true;
+    let parar: (() => void) | null = null;
+
+    ipc
+      .custoDoWorkspace(ws)
+      .then((c) => vivo && setCustoTotal(c.total))
+      .catch(() => {});
+
+    escutar<EventoCusto>("custo:atualizado", (p) => {
+      if (p.workspace_id === ws) setCustoTotal(p.total);
+    }).then((f) => (vivo ? (parar = f) : f()));
+
+    return () => {
+      vivo = false;
+      parar?.();
+    };
+  }, [estado]);
 
   // --------------------------------------------------------------- ações
 
@@ -324,7 +366,7 @@ export default function App() {
       <header className="barra">
         <div className="marca">
           Mutirão
-          <span className="versao">M0</span>
+          <span className="versao">M1</span>
         </div>
 
         <div className="ferramentas">
@@ -342,11 +384,22 @@ export default function App() {
         </div>
 
         <div className="direita">
+          {ADAPTADOR_ATUAL === "falso" && (
+            <span
+              className="selo alerta"
+              title="As respostas vêm de um roteiro, não de um modelo. Nenhum token é gasto."
+            >
+              adaptador falso
+            </span>
+          )}
           {modoNavegador && (
             <span className="selo" title="Sem backend: nada é gravado em disco">
               modo navegador
             </span>
           )}
+          <span className="custo-total" title="Custo acumulado deste workspace, em dólar">
+            {formatarCusto(custoTotal)}
+          </span>
           <span className="zoom">{Math.round(vp.zoom * 100)}%</span>
         </div>
       </header>
@@ -378,6 +431,8 @@ export default function App() {
               key={n.id}
               no={n}
               selecionado={selecionado === n.id}
+              estadoSessao={estadosSessao[n.id]}
+              aoMudarEstadoSessao={(e) => registrarEstadoSessao(n.id, e)}
               aoSelecionar={() => {
                 setSelecionado(n.id);
                 void ipc

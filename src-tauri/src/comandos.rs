@@ -104,3 +104,71 @@ pub fn criar_cabo(
 pub fn remover_cabo(estado: State<EstadoApp>, id: String) -> ResultadoIpc<()> {
     Ok(estado.banco()?.remover_cabo(&id)?)
 }
+
+// --------------------------------------------------------------- sessões
+
+/// Abre a face conversa de um nó. Devolve a sessão existente se já houver —
+/// reabrir o app continua a conversa, não começa outra.
+#[tauri::command]
+pub fn abrir_sessao(
+    estado: State<EstadoApp>,
+    node_id: String,
+    adaptador: Adaptador,
+) -> ResultadoIpc<Sessao> {
+    Ok(estado.orquestrador().abrir_sessao(&node_id, adaptador)?)
+}
+
+#[tauri::command]
+pub fn sessao_do_no(estado: State<EstadoApp>, node_id: String) -> ResultadoIpc<Option<Sessao>> {
+    Ok(estado.banco()?.sessao_do_no(&node_id)?)
+}
+
+/// Manda um turno. Volta assim que o turno começa: a resposta chega pelos
+/// eventos `sessao:evento` e `sessao:estado`, não por este retorno.
+#[tauri::command]
+pub fn enviar_mensagem(
+    estado: State<EstadoApp>,
+    session_id: String,
+    texto: String,
+) -> ResultadoIpc<()> {
+    Ok(estado.orquestrador().enviar(&session_id, &texto)?)
+}
+
+#[tauri::command]
+pub fn cancelar_turno(estado: State<EstadoApp>, session_id: String) -> ResultadoIpc<()> {
+    Ok(estado.orquestrador().cancelar(&session_id)?)
+}
+
+#[tauri::command]
+pub fn historico(
+    estado: State<EstadoApp>,
+    session_id: String,
+    limite: i64,
+) -> ResultadoIpc<Vec<Mensagem>> {
+    Ok(estado.banco()?.historico(&session_id, limite)?)
+}
+
+/// As ações do agente, que na face conversa viram cards em vez de texto de log.
+#[tauri::command]
+pub fn acoes_da_sessao(
+    estado: State<EstadoApp>,
+    session_id: String,
+) -> ResultadoIpc<Vec<ChamadaFerramenta>> {
+    Ok(estado.banco()?.ferramentas_da_sessao(&session_id)?)
+}
+
+#[tauri::command]
+pub fn custo_do_workspace(
+    estado: State<EstadoApp>,
+    workspace_id: String,
+) -> ResultadoIpc<CustoWorkspace> {
+    let (total, por_no) = estado.banco()?.custo_do_workspace(&workspace_id)?;
+    Ok(CustoWorkspace { total, por_no })
+}
+
+/// Tupla não atravessa fronteira com nome; um objeto, sim.
+#[derive(serde::Serialize)]
+pub struct CustoWorkspace {
+    pub total: f64,
+    pub por_no: Vec<CustoDoNo>,
+}
