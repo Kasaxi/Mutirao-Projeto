@@ -762,3 +762,175 @@ fn amanha_eu_reabro_o_mesmo_time() {
     assert!(!banco.listar_cabos(&ws2.id).unwrap().is_empty(), "os cabos não voltaram");
     let _ = std::fs::remove_dir_all(&outra);
 }
+
+// ==================================================================== M5 ===
+// "dois ensaios do mesmo trabalho rodam ao mesmo tempo e eu publico um deles
+// sem entender de Git" — o critério de pronto do M5.
+
+struct DoisRascunhos {
+    banco: Arc<Mutex<Banco>>,
+    orq: Arc<Orquestrador>,
+    ws: String,
+    no: String,
+    pasta: std::path::PathBuf,
+    repo: std::path::PathBuf,
+    _barramento: Barramento,
+}
+
+fn dois_rascunhos() -> Option<DoisRascunhos> {
+    if !nucleo::git::existe() {
+        eprintln!("git não instalado; pulando");
+        return None;
+    }
+    let raiz = std::env::temp_dir().join(format!("mutirao-m5-{}", nucleo::novo_id()));
+    let pasta = raiz.join("obra");
+    let repo = raiz.join("historico");
+    std::fs::create_dir_all(&pasta).unwrap();
+    std::fs::write(
+        pasta.join("contrato.txt"),
+        "Prazo: 18 meses. Reajuste anual pelo IGP-M.\n",
+    )
+    .unwrap();
+
+    let banco = Banco::em_memoria().unwrap();
+    let ws = banco.criar_workspace("Obra", pasta.to_str().unwrap()).unwrap();
+    banco.definir_repo(&ws.id, repo.to_str().unwrap()).unwrap();
+    let no = banco.criar_no(&ws.id, TipoNo::Agente, "Leitor", 0.0, 0.0).unwrap();
+    let banco = Arc::new(Mutex::new(banco));
+
+    let sink: Sink = Arc::new(|_| {});
+    let fabrica: Arc<dyn Fabrica> = Arc::new(FabricaClaude::nova());
+    let orq = Arc::new(Orquestrador::novo(banco.clone(), fabrica, sink.clone()));
+    let barramento = Barramento::subir(banco.clone(), orq.clone(), sink).unwrap();
+    orq.ligar_barramento(barramento.url_base());
+    nucleo::ensaios::preparar(&banco.lock().unwrap(), &ws.id).unwrap();
+
+    Some(DoisRascunhos {
+        banco,
+        orq,
+        ws: ws.id,
+        no: no.id,
+        pasta,
+        repo,
+        _barramento: barramento,
+    })
+}
+
+impl DoisRascunhos {
+    fn esperar(&self, sessao: &str, limite: Duration) -> bool {
+        let inicio = Instant::now();
+        while inicio.elapsed() < limite {
+            let e = self.banco.lock().unwrap().obter_sessao(sessao).unwrap().estado;
+            if matches!(e, EstadoSessao::Ocioso | EstadoSessao::Erro) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        false
+    }
+
+    /// Aprova tudo que o agente pedir. O card é do M2 e já tem teste próprio;
+    /// aqui ele é só o caminho até a gravação acontecer.
+    fn aprovar_tudo(&self) {
+        let orq = self.orq.clone();
+        let banco = self.banco.clone();
+        std::thread::spawn(move || {
+            for _ in 0..600 {
+                let pendentes: Vec<String> = banco
+                    .lock()
+                    .unwrap()
+                    .conn_pendentes()
+                    .unwrap_or_default();
+                for id in pendentes {
+                    let _ = orq.decidir_aprovacao(&id, Decisao::Aprovada, false);
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+    }
+}
+
+impl Drop for DoisRascunhos {
+    fn drop(&mut self) {
+        self.orq.encerrar_tudo();
+        let _ = std::fs::remove_dir_all(self.pasta.parent().unwrap());
+        let _ = &self.repo;
+    }
+}
+
+#[test]
+#[ignore = "gasta token e precisa do Claude Code instalado"]
+fn dois_agentes_trabalham_em_dois_rascunhos_do_mesmo_trabalho() {
+    let Some(d) = dois_rascunhos() else { return };
+    d.aprovar_tudo();
+
+    let a = nucleo::ensaios::criar(&d.banco.lock().unwrap(), &d.ws, "Prazo maior").unwrap();
+    let b = nucleo::ensaios::criar(&d.banco.lock().unwrap(), &d.ws, "Prazo menor").unwrap();
+
+    // O MESMO nó trabalha nos dois, um de cada vez — que é o que a interface
+    // faz quando o usuário troca de rascunho.
+    for (ensaio, pedido, esperado) in [
+        (&a, "Reescreva contrato.txt trocando o prazo para 24 meses. Só isso.", "24"),
+        (&b, "Reescreva contrato.txt trocando o prazo para 12 meses. Só isso.", "12"),
+    ] {
+        nucleo::ensaios::trocar(&d.banco.lock().unwrap(), &d.orq, &d.ws, Some(&ensaio.id))
+            .unwrap();
+        let sessao = d.orq.abrir_sessao(&d.no, Adaptador::Claude).unwrap();
+        d.orq.enviar(&sessao.id, pedido).unwrap();
+        assert!(
+            d.esperar(&sessao.id, Duration::from_secs(300)),
+            "o turno em \"{}\" não terminou",
+            ensaio.nome
+        );
+
+        let escrito = std::fs::read_to_string(
+            std::path::Path::new(&ensaio.caminho_worktree).join("contrato.txt"),
+        )
+        .unwrap();
+        println!("{} → {}", ensaio.nome, escrito.trim());
+        assert!(escrito.contains(esperado), "\"{}\" ficou com: {escrito}", ensaio.nome);
+    }
+
+    // Os dois rascunhos guardam versões diferentes ao mesmo tempo...
+    let em_a = std::fs::read_to_string(
+        std::path::Path::new(&a.caminho_worktree).join("contrato.txt"),
+    )
+    .unwrap();
+    let em_b = std::fs::read_to_string(
+        std::path::Path::new(&b.caminho_worktree).join("contrato.txt"),
+    )
+    .unwrap();
+    assert!(em_a.contains("24") && em_b.contains("12"), "um rascunho vazou no outro");
+
+    // ...e a pasta de verdade não mudou nada.
+    let de_verdade = std::fs::read_to_string(d.pasta.join("contrato.txt")).unwrap();
+    assert!(
+        de_verdade.contains("18"),
+        "o trabalho de um rascunho vazou para a pasta de verdade: {de_verdade}"
+    );
+
+    // Publicar um deles leva o trabalho — sem o usuário entender de Git.
+    nucleo::ensaios::trocar(&d.banco.lock().unwrap(), &d.orq, &d.ws, None).unwrap();
+    let feito =
+        nucleo::ensaios::publicar(&d.banco.lock().unwrap(), &d.orq, &a.id, &[]).unwrap();
+    println!("publicado: {:?}", feito.alteracoes);
+
+    let publicado = std::fs::read_to_string(d.pasta.join("contrato.txt")).unwrap();
+    println!("a pasta de verdade agora: {}", publicado.trim());
+    assert!(publicado.contains("24"), "publicar não levou o trabalho: {publicado}");
+
+    // E o outro rascunho continua lá, intocado, com a versão dele.
+    let b_depois = std::fs::read_to_string(
+        std::path::Path::new(&b.caminho_worktree).join("contrato.txt"),
+    )
+    .unwrap();
+    assert!(b_depois.contains("12"), "publicar um rascunho mexeu no outro");
+
+    // A pasta do usuário continua limpa: nenhum vestígio de Git.
+    let dentro: Vec<String> = std::fs::read_dir(&d.pasta)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(!dentro.iter().any(|n| n.starts_with('.')), "sobrou coisa oculta: {dentro:?}");
+}

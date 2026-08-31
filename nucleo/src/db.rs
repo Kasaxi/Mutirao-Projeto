@@ -953,6 +953,16 @@ impl Banco {
         Ok(())
     }
 
+    /// Ids das ferramentas esperando decisão, em todo o banco. Existe para o
+    /// teste ao vivo poder "clicar em aprovar" sem saber de qual sessão veio.
+    pub fn conn_pendentes(&self) -> Resultado<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT id FROM tool_call WHERE aprovacao = 'pendente'")?;
+        let linhas = st.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(linhas.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn ferramentas_da_sessao(&self, session_id: &str) -> Resultado<Vec<ChamadaFerramenta>> {
         let mut st = self.conn.prepare(
             "SELECT id, session_id, ferramenta, argumentos_json, resultado_json, erro,

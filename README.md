@@ -3,16 +3,17 @@
 Orquestrador de agentes de IA num canvas infinito, para trabalho geral — não só
 código. Windows 11, Tauri 2 + React.
 
-**Estado: M0 a M4 prontos.** Canvas com pan e zoom, nós arrastáveis e
+**Estado: M0 a M5 prontos.** Canvas com pan e zoom, nós arrastáveis e
 redimensionáveis, cabos entre eles, tudo persistido em SQLite (M0). Nó de agente
 conversando com o **Claude Code de verdade**: face conversa e face terminal,
 turno com cancelamento, ações como cards, retomada da sessão e custo por turno e
 por workspace (M1). Notas que viram `.md` na sua pasta, árvore de arquivos de
 verdade, e o agente gravando **só depois de você aprovar** (M2). Um agente
 **fala com outro**: o Pesquisador pede ao Redator e devolve a resposta, sem
-você tocar (M3). E agora um prompt **monta o time**: papéis com prompt e
-ferramentas próprias, um Organizador que recruta quem falta, e o time inteiro
-salvo para reabrir amanhã (M4).
+você tocar (M3). Um prompt **monta o time**: papéis com prompt e ferramentas
+próprias, um Organizador que recruta quem falta, e o time inteiro salvo para
+reabrir amanhã (M4). E agora **rascunhos**: duas versões do mesmo trabalho
+rodando ao mesmo tempo, e publicar uma delas sem você ver uma linha de Git (M5).
 
 > **Um nó só enxerga o que os cabos deixam.** Ligou `fala_com`? Pode mandar
 > recado. Não ligou? Aquele nó **não existe** — e a mensagem de erro é a mesma
@@ -25,9 +26,10 @@ salvo para reabrir amanhã (M4).
 > Para gravação você pode dizer "não perguntar de novo nesta pasta"; para rodar
 > comando, não — isso pergunta sempre.
 
-Precisa do [Claude Code](https://code.claude.com) instalado e autenticado. Sem
-ele o app sobe assim mesmo, no adaptador falso (roteiro em vez de modelo), e diz
-isso na barra de cima — nunca em silêncio.
+Precisa do [Claude Code](https://code.claude.com) instalado e autenticado, e do
+Git para os rascunhos. Sem qualquer um dos dois o app sobe assim mesmo — no
+adaptador falso (roteiro em vez de modelo) e sem rascunho — e **diz isso na
+barra de cima**, nunca em silêncio.
 
 ```bash
 npm install
@@ -41,11 +43,11 @@ MUTIRAO_CLAUDE_BIN=...  npm run app   # CLI fora do PATH (comum no Windows)
 Testes:
 
 ```bash
-cargo test -p nucleo        # 113 testes, offline e de graça
-node testes-ui/fumaca.mjs   # 55 verificações da interface no Chromium
+cargo test -p nucleo        # 128 testes, offline e de graça
+node testes-ui/fumaca.mjs   # 66 verificações da interface no Chromium
 
 # Estes gastam token e precisam da CLI instalada. Rode ao subir de versão dela.
-# Os do M3 e do M4 sobem VÁRIOS Claude Code ao mesmo tempo, falando entre si.
+# Os do M3 ao M5 sobem VÁRIOS Claude Code, falando entre si e em rascunhos.
 cargo test -p nucleo --test ao_vivo -- --ignored --nocapture
 ```
 
@@ -68,7 +70,7 @@ janela, IPC e a tradução de evento do núcleo em evento de janela. O front
 
 Essa separação existe por um motivo prático: `cargo test -p nucleo` roda em
 qualquer máquina, sem as dependências de sistema do Tauri — e é onde estão os
-113 testes, inclusive os de turno completo, os da ponte entre nós e os do time.
+128 testes, inclusive os de turno completo, os da ponte, os do time e os de rascunho.
 
 O adaptador falso (`nucleo/src/agente.rs`) não é conveniência de teste: testar
 orquestração contra a API de verdade é lento, caro e não-determinístico. Ele lê
@@ -123,6 +125,23 @@ conversa junto, e quem apaga nó é você.
 
 **Salvar time** guarda quem trabalha e como está ligado, para reabrir amanhã.
 Não guarda a conversa: partitura é a planta do time, não um backup dele.
+
+## Rascunhos
+
+Um rascunho é uma cópia isolada da pasta em que o time trabalha sem mexer no que
+está valendo. Dois deles rodam ao mesmo tempo, com versões diferentes do mesmo
+arquivo, e a pasta de verdade só muda quando você publica.
+
+**Publicar mostra antes.** Quantos arquivos mudam, quais conflitam, e de qual
+lado ficar em cada conflito — nada vem pré-marcado. É o mesmo padrão do card de
+aprovação, e pelo mesmo motivo: reescrever arquivo na pasta de alguém não se
+desfaz, se mostra antes.
+
+Por baixo é Git, e **você nunca vê isso** — nem uma palavra de branch, commit ou
+merge, o que o teste de fumaça confere varrendo a tela. O repositório fica fora
+da sua pasta, na pasta de dados do app: a sua continua com os arquivos do
+trabalho e mais nada. Isso não é só estética — pasta de trabalho no Windows quase
+sempre está no OneDrive, e diretório Git dentro de pasta sincronizada corrompe.
 
 ## Licença e uso
 

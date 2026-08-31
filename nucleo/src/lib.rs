@@ -2703,10 +2703,10 @@ mod testes {
         }
         // E continua alcançando as do §6 — menos montar time, que é função de
         // papel e não padrão de fábrica.
-        let doSeis = papeis::ferramentas_do_papel(None);
-        assert!(doSeis.contains(&"escrever_nota".to_string()));
-        assert!(doSeis.contains(&"enviar_para".to_string()));
-        assert!(!doSeis.contains(&"recrutar".to_string()));
+        let do_seis = papeis::ferramentas_do_papel(None);
+        assert!(do_seis.contains(&"escrever_nota".to_string()));
+        assert!(do_seis.contains(&"enviar_para".to_string()));
+        assert!(!do_seis.contains(&"recrutar".to_string()));
     }
 
     // ================================================================ M5 ===

@@ -359,6 +359,34 @@ O que o marco corrigiu no plano:
 **Pronto quando:** dois ensaios do mesmo trabalho rodam ao mesmo tempo e eu publico um deles
 sem entender de Git.
 
+**Pronto** — os dois primeiros itens. Com o Claude Code de verdade: dois rascunhos do mesmo
+contrato guardaram 24 e 12 meses ao mesmo tempo, a pasta de verdade ficou nos 18 originais,
+publicar um levou o 24 e o outro continuou com o 12. A pasta do usuário não tem nada oculto
+dentro — nem `.git`, nem `.mutirao`.
+
+Quatro coisas que a medição decidiu:
+
+1. **O repositório fica FORA da pasta do usuário**, e a Decisão 3 dizia `.mutirao/` dentro dela.
+   O motivo é do Windows 11: a pasta de trabalho quase sempre está em Documentos, que quase
+   sempre está no OneDrive, e diretório Git dentro de pasta sincronizada é forma conhecida de
+   corromper o repositório. Fora, a pasta fica literalmente limpa.
+2. **`git add -A`, nunca `-u`.** `-u` só pega arquivo já rastreado, e criar arquivo é o que um
+   agente faz o tempo todo. Com `-u`, o parecer recém-escrito sumiria na publicação.
+3. **Mesclar numa pasta com alteração não gravada não é recusado pelo git** — ele mescla e
+   deixa marcador de conflito dentro do arquivo do usuário. Publicar grava os dois lados antes.
+4. **A CLI do git, não libgit2**, por `merge-tree --write-tree --name-only`: mesclagem seca que
+   nomeia o que conflitaria sem tocar em nada. É exatamente a tela de publicar.
+
+E a correção que mais importa, porque desmente uma frase do M4: **`--tools` com `--restricted`
+gateia as ferramentas nativas, não as de MCP.** Medido. O comportamento estava certo — a
+checagem em `ferramentas::executar` já recusava —, mas o esconder estava no lugar errado. Agora
+o nosso `tools/list` filtra pelo papel, que é o único lado que conhece o papel.
+
+**O que ficou de fora: o portal de navegador (WebView2 + CDP).** É Windows-only por construção,
+e esta máquina é Linux — não dá para escrever nem verificar aqui. O nó `portal` continua maquete
+e diz isso na tela. Fica junto do adaptador Codex, pela mesma razão: o item pede prova, e prova
+exige a plataforma.
+
 ### M6 — Ferramenta instalável · 2 semanas
 - Instalador e auto-update — reinstalar na mão a cada correção é imposto diário
 - Onboarding que detecta e instala as CLIs de agente e acha a chave no ambiente

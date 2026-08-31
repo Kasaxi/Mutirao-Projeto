@@ -23,7 +23,7 @@ use crate::git;
 use crate::modelo::*;
 use crate::orquestrador::Orquestrador;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Onde ficam os worktrees dos rascunhos de um workspace.
 ///

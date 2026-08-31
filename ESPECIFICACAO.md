@@ -5,11 +5,12 @@ Companheiro do `ARQUITETURA.md`. Aquele diz **o quê** e **por quê**; este diz
 abrir este arquivo e escrever a próxima função sem inventar nome, caminho ou
 formato.
 
-Estado atual: **M0 a M4 prontos e testados** contra o Claude Code de verdade —
+Estado atual: **M0 a M5 prontos e testados** contra o Claude Code de verdade —
 sessão, turno, cancelamento, custo, retomada, duas faces (M1); barramento local
 com card de aprovação, notas em arquivo e árvore da pasta (M2); servidor MCP,
 ponte entre nós e os limites da cadeia (M3); papéis, Maestro Mode e times
-salvos (M4). M5 em diante ainda é contrato, não código.
+salvos (M4); rascunhos sobre Git oculto, tela de publicar e host MCP (M5). O
+portal de navegador do M5 e o M6 ainda são contrato, não código.
 
 ---
 
@@ -31,13 +32,15 @@ mutirao/
 │   │   ├── 001_inicial.sql        esquema completo, executável
 │   │   ├── 002_adaptador_falso.sql  'falso' no CHECK de session.adaptador
 │   │   ├── 003_regras_de_aprovacao.sql  a caixa "não perguntar de novo"
-│   │   └── 004_papeis.sql        papel no nó, modelo por papel, quem recrutou
+│   │   ├── 004_papeis.sql        papel no nó, modelo por papel, quem recrutou
+│   │   ├── 005_ensaios.sql       onde mora o histórico oculto
+│   │   └── 006_mcp_externo.sql   servidores MCP externos por papel
 │   ├── testes/
 │   │   └── claude_stream.jsonl  saída REAL da CLI, guardada como fixture
 │   ├── tests/
 │   │   └── ao_vivo.rs      testes #[ignore] que rodam o Claude Code de verdade
 │   └── src/
-│       ├── lib.rs          fachada + 113 testes
+│       ├── lib.rs          fachada + 128 testes
 │       ├── modelo.rs       tipos de domínio, máquina de estados, preços
 │       ├── agente.rs       trait AgenteAdapter, Roteiro, adaptador falso
 │       ├── claude.rs       adaptador do Claude Code (CLI headless)
@@ -46,6 +49,8 @@ mutirao/
 │       ├── ferramentas.rs  as ferramentas do §6, com escopo pelos cabos
 │       ├── papeis.rs       biblioteca embutida e escada de autonomia
 │       ├── partituras.rs   fotografar e montar um time salvo
+│       ├── git.rs          o Git oculto: repo fora da pasta, merge seco
+│       ├── ensaios.rs      rascunhos: criar, trocar, publicar, descartar
 │       ├── arquivos.rs     escopo de caminho, listar, ler e gravar
 │       ├── orquestrador.rs turno, fila, ponte entre nós, limites
 │       ├── db.rs           migrations e todo o acesso a dados
@@ -73,15 +78,17 @@ mutirao/
 │       ├── viewport.ts     matemática de pan/zoom, enquadrar
 │       ├── NoView.tsx      um nó
 │       ├── Conversa.tsx    face conversa e face terminal
+│       ├── Rascunhos.tsx   barra de rascunhos e tela de publicar
 │       └── Cabos.tsx       SVG dos cabos
 │
 └── testes-ui/
-    ├── fumaca.mjs          55 verificações no Chromium
+    ├── fumaca.mjs          66 verificações no Chromium
     ├── canvas.png          retrato do canvas em repouso
     ├── conversa.png        retrato de um turno inteiro
     ├── aprovacao.png       o card aberto, com o turno parado atrás
     ├── ponte.png           a ponte no ato de atravessar
-    └── time.png            o time montado, com papel em cada nó
+    ├── time.png            o time montado, com papel em cada nó
+    └── publicar.png        a tela de publicar, em linguagem de gente
 ```
 
 **Regra de ouro:** nenhuma regra de negócio em `src-tauri/`. Se um comando
@@ -101,7 +108,7 @@ Linux, sem as dependências de sistema do Tauri.
 | Node 20+ | front e ferramentas |
 | Visual Studio Build Tools + Windows SDK | linkagem do Tauri |
 | WebView2 Runtime | já vem no Windows 11 |
-| Git for Windows (opcional) | usado pela ferramenta Bash do Claude Code, no M1 |
+| Git for Windows | **os rascunhos do M5 precisam dele**; sem ele o app roda sem rascunho e diz isso na barra. Também é o que a ferramenta Bash do Claude Code usa |
 
 ### Comandos
 
@@ -112,7 +119,7 @@ npm run app                 # app de verdade (tauri dev)
 npm run build               # typecheck + build do front
 npm run app:build           # instalador MSI/NSIS
 
-cargo test -p nucleo        # 113 testes do núcleo, offline e de graça
+cargo test -p nucleo        # 128 testes do núcleo, offline e de graça
 node testes-ui/fumaca.mjs   # teste de fumaça da interface
 ```
 
@@ -186,6 +193,13 @@ detalhe vai para o stderr.
 | `listar_times` | `workspaceId` | `Partitura[]` | — |
 | `abrir_time` | `workspaceId, partituraId` | `No[]` | `nao_encontrado`, `invalido` (passaria do teto) |
 | `remover_time` | `id` | — | `nao_encontrado` |
+| `listar_rascunhos` | `workspaceId` | `Ensaio[]` | — |
+| `criar_rascunho` | `workspaceId, nome` | `Ensaio` | `invalido` (sem histórico, nome repetido) |
+| `trocar_rascunho` | `workspaceId, ensaioId \| null` | — | `invalido` (já publicado), `nao_encontrado` |
+| `descartar_rascunho` | `ensaioId` | — | `nao_encontrado` |
+| `prever_publicacao` | `ensaioId` | `PreviaPublicacao` | `nao_encontrado`, `invalido` (sem histórico) |
+| `publicar_rascunho` | `ensaioId, escolhas` | `PreviaPublicacao` | `invalido` (conflito sem escolha, já publicado) |
+| `definir_mcp_do_papel` | `id, servidores` | `Papel` | `invalido` (nome com curinga, sem endereço) |
 | `acoes_da_sessao` | `sessionId` | `ChamadaFerramenta[]` | — |
 | `custo_do_workspace` | `workspaceId` | `{ total, por_no }` | — |
 
@@ -490,6 +504,80 @@ quebrariam o `enviar_para`, que resolve vizinho pelo nome.
 
 ---
 
+## 5c. Rascunhos e o Git oculto
+
+A `Decisão 3` do `ARQUITETURA.md`: "Git existe, mas o usuário nunca fica
+sabendo". Implementada em `nucleo/src/git.rs` e `nucleo/src/ensaios.rs`.
+
+### Onde o repositório mora — e por que não onde o plano dizia
+
+**Fora da pasta do usuário**, na pasta de dados do app
+(`workspace.repo`, escolhido pela casca). O plano dizia `.mutirao/` dentro,
+com atributo hidden.
+
+O motivo é específico do Windows 11: a pasta de trabalho de alguém quase sempre
+está em `Documentos`, que quase sempre está sincronizada com o OneDrive — e um
+diretório Git dentro de pasta sincronizada é uma forma conhecida de corromper o
+repositório, porque o sincronizador mexe em arquivos que o Git presume só seus.
+
+Fora, a pasta do usuário fica **literalmente limpa**. Medido: depois de `init` e
+um commit, `ls -a` lista só os arquivos do trabalho. Os worktrees dos rascunhos
+ficam ao lado do repositório, pelo mesmo motivo mais um: rascunho é trabalho
+pela metade, e trabalho pela metade não deve aparecer na pasta que a pessoa abre
+no Explorer.
+
+O custo: mover a pasta do workspace desliga o histórico. Já era assim — o
+caminho absoluto está gravado em `workspace.pasta` desde o M0.
+
+### A pasta de trabalho é um lugar só
+
+`Banco::pasta_de_trabalho(workspace)` responde "onde escrevo agora": o worktree
+do rascunho em foco, ou a pasta do usuário. **Os quatro** caminhos que precisam
+saber isso passam por ela — o contexto do adaptador, as ferramentas do §6, a
+árvore de arquivos e as notas.
+
+Ter dois lugares que respondem isso seria o pior bug que este projeto pode ter:
+uma sessão viva apontando para o worktree errado grava no lugar errado **com
+aprovação legítima do usuário**. O card diria a verdade sobre o conteúdo e
+mentiria sobre o destino.
+
+Daí decorre que `ensaios::trocar` **derruba os adaptadores vivos** antes de
+mudar o ponteiro. O processo do agente recebe a pasta no `current_dir` quando
+abre, e nunca mais muda de ideia; ninguém avisa o processo de nada. Os
+processos morrem, as sessões ficam gravadas e o próximo turno as retoma — o
+usuário perde o processo, não a conversa.
+
+### Três coisas medidas sobre o git
+
+1. **`git add -A`, nunca `-u`.** `-u` só pega arquivo já rastreado, e criar
+   arquivo é o que um agente faz o tempo todo. Com `-u`, o parecer que o
+   Redator acabou de escrever ficaria de fora do rascunho e sumiria na
+   publicação — perda de trabalho silenciosa.
+2. **Mesclar numa pasta com alteração não gravada não é recusado.** O git
+   mescla e deixa marcador de conflito dentro do arquivo do usuário. Por isso
+   `publicar` grava os dois lados antes de mesclar.
+3. **`merge-tree --write-tree --name-only`** faz a mesclagem em memória e
+   nomeia o que conflitaria, sem tocar em nada. É a razão de este módulo falar
+   com a CLI do git em vez de libgit2: reimplementar merge de três vias para
+   chegar ao mesmo lugar é trabalho de meses com muito mais chance de errar.
+
+Sem git na máquina, `workspace.repo` fica `NULL` e o app inteiro continua
+servindo — só não tem rascunho, e a barra diz isso. Perder o recurso é
+aceitável; fingir que ele funciona não é.
+
+### Publicar
+
+`prever_publicacao` **não escreve nada**: é o que a tela mostra antes do clique.
+`publicar_rascunho` grava os dois lados, mescla, e resolve cada conflito com a
+escolha que o usuário fez. Conflito sem escolha **aborta tudo** e devolve a
+pasta como estava: publicar pela metade é pior que não publicar.
+
+Na tela, nenhuma palavra de Git — e há uma verificação de fumaça que varre o
+texto atrás de `git`, `branch`, `commit`, `merge`, `worktree`, `rebase` e
+`stash`. Promessa de produto sem teste vira lembrete.
+
+---
+
 ## 6. Máquina de estados do turno
 
 Implementada em `nucleo/src/modelo.rs` (`EstadoSessao::pode_ir_para`) e coberta
@@ -596,9 +684,9 @@ Nenhuma palavra de Git aparece. Binário não faz merge: escolhe-se um lado.
 
 | Camada | Como | Cobre |
 |---|---|---|
-| Núcleo | `cargo test -p nucleo` — 113 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras, handshake do MCP, ponte entre nós, fila e os limites, papéis e escada de autonomia, recrutamento com teto, partitura ida e volta |
-| Interface | `node testes-ui/fumaca.mjs` — 55 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; um turno de ponta a ponta; o card de aprovação com aprovar, negar e "não perguntar de novo"; nota em arquivo e árvore da pasta; o cabo acendendo e o recado chegando ao outro nó com o nome de quem pediu; papel no cabeçalho, time salvo e reaberto com a forma que tinha |
-| Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` — 13 testes | o Claude Code de verdade: lê, responde, cobra, retoma, reporta erro com a frase certa, grava depois de aprovado, **não** grava quando negado, **não** grava sem barramento — e, com **dois** processos, entrega de um nó a outro e encerra a cadeia sem travar; e um prompt monta um time de quatro, com o papel mudando o que cada agente de fato faz |
+| Núcleo | `cargo test -p nucleo` — 128 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras, handshake do MCP, ponte entre nós, fila e os limites, papéis e escada de autonomia, recrutamento com teto, partitura ida e volta, rascunhos em paralelo, publicar com e sem conflito |
+| Interface | `node testes-ui/fumaca.mjs` — 66 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; um turno de ponta a ponta; o card de aprovação com aprovar, negar e "não perguntar de novo"; nota em arquivo e árvore da pasta; o cabo acendendo e o recado chegando ao outro nó com o nome de quem pediu; papel no cabeçalho, time salvo e reaberto com a forma que tinha; a barra de rascunhos e a tela de publicar — que é varrida atrás de palavra de Git |
+| Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` — 14 testes | o Claude Code de verdade: lê, responde, cobra, retoma, reporta erro com a frase certa, grava depois de aprovado, **não** grava quando negado, **não** grava sem barramento — e, com **dois** processos, entrega de um nó a outro e encerra a cadeia sem travar; e um prompt monta um time de quatro, com o papel mudando o que cada agente de fato faz; e dois rascunhos do mesmo trabalho guardando versões diferentes ao mesmo tempo |
 
 **Duas pastas parecidas, de propósito.** `nucleo/testes/` guarda fixtures (nome
 em português, como o resto); `nucleo/tests/` é a pasta que o Cargo exige em
@@ -645,6 +733,19 @@ Alguns testes valem por si, porque cobrem coisa que falha calada:
 - `dois_nos_esperando_um_pelo_outro_nao_travam_o_app` — verificado ao contrário:
   com a detecção de ciclo desligada, os dois nós travam e o teste falha. Um
   teste de "não trava" que nunca foi visto falhando não prova nada.
+- `a_pasta_de_trabalho_e_um_lugar_so` — se dois lugares responderem "onde
+  escrevo", uma sessão viva grava no worktree errado **com aprovação legítima**:
+  o card diz a verdade sobre o conteúdo e mente sobre o destino.
+- `o_trabalho_feito_a_mao_nao_vira_lixo_de_merge` — medido: mesclar numa pasta
+  com alteração não gravada não é recusado pelo git; ele deixa marcador de
+  conflito dentro do documento da pessoa.
+- `a_chave_do_servidor_externo_nao_atravessa_a_fronteira_ipc` — a primeira
+  tentativa (`skip_serializing` no campo) escondia o segredo do IPC **e do
+  banco**, e o adaptador ficava sem o que mandar. Esconder é trabalho da borda,
+  não do tipo.
+- "não usa uma palavra de Git" (fumaça) — a tela de publicar é varrida atrás de
+  `git`, `branch`, `commit`, `merge`, `worktree`, `rebase` e `stash`. A
+  `Decisão 3` é promessa de produto, e promessa sem teste vira lembrete.
 
 Um teste que passou merece um comentário no código quando o motivo dele não é
 óbvio. Dois exemplos já no repositório: o `overflow` do nó, que tornava a porta
@@ -949,8 +1050,14 @@ pronto do `ARQUITETURA.md`.
   outra metade do que um papel vale: o Pesquisador, mandado gravar um arquivo,
   leu, **não gravou** e explicou que ia delegar — porque o papel `cauteloso`
   não recebe ferramenta de escrita nenhuma.
+- **M5** — *dois ensaios do mesmo trabalho rodam ao mesmo tempo e eu publico um
+  deles sem entender de Git.* Funciona. Com o Claude Code de verdade em
+  `dois_agentes_trabalham_em_dois_rascunhos_do_mesmo_trabalho`: dois rascunhos
+  guardaram 24 e 12 meses ao mesmo tempo, a pasta de verdade ficou nos 18
+  originais, publicar um levou o 24 e o outro continuou com o 12 — e a pasta do
+  usuário não tem nada oculto dentro.
 
-### O que ficou de fora do M3 e do M4, com intenção
+### O que ficou de fora do M3, M4 e M5, com intenção
 
 1. **Adaptador Codex.** O plano previa fazê-lo no M3 "para provar que a ponte é
    agnóstica". A ponte é agnóstica por construção — quem fala com outro nó é o
@@ -963,37 +1070,48 @@ pronto do `ARQUITETURA.md`.
    arquitetura — e a biblioteca embutida cobre o trabalho de hoje.
 3. **Face terminal com histórico.** Ela mostra o fluxo cru a partir do turno
    seguinte, porque o fluxo não é gravado — só o que ele produz.
-4. **Ensaios e Git oculto.** São do M5. A pasta do workspace é uma pasta comum,
-   ainda sem repositório por baixo.
-5. **Escolher a pasta do workspace pela interface.** Ela nasce em
+4. **O portal de navegador (WebView2 + CDP).** É o terceiro item do M5 e o
+   único que não entregamos. É Windows-only por construção — WebView2 não
+   existe em Linux, que é onde este código foi escrito —, então não dá para
+   escrever nem verificar aqui. O nó `portal` continua maquete e diz isso na
+   tela. Fica junto do adaptador Codex, pela mesma razão: o item pede prova, e
+   prova exige a plataforma.
+5. **Interface para servidores MCP externos.** O núcleo e o IPC têm
+   `definir_mcp_do_papel`; a tela para digitar endereço e chave não existe
+   ainda. É a mesma situação do editor de papéis — uma tela, não uma decisão.
+6. **Escolher a pasta do workspace pela interface.** Ela nasce em
    `Documentos/Mutirão/<nome>`. Um seletor de pasta exige o plugin de diálogo
    do Tauri; é uma tela, não uma decisão de arquitetura.
 
-### Começando o M5
+### Começando o M6
 
-O M5 é *"dois ensaios do mesmo trabalho rodam ao mesmo tempo e eu publico um
-deles sem entender de Git"*. O que o M4 deixa pronto:
+O M6 é *"eu instalo numa máquina limpa e trabalho, sem montar ambiente de
+desenvolvimento"* — o critério já ajustado pela Decisão 4 do §11, porque
+enquanto o uso for interno não existe "alguém que não é programador". O que o
+M5 deixa pronto:
 
-1. `node.ensaio_id` e a tabela `ensaio` existem desde a 001, com `ON DELETE
-   CASCADE` — o isolamento por ensaio tem onde morar sem migration nenhuma.
-2. `partituras::montar` já sabe recriar um time inteiro a partir de um
-   snapshot. Um ensaio é parente próximo disso: mesmo canvas, outro worktree.
-3. O `workspace.pasta` já é a única raiz que o agente enxerga
-   (`arquivos::dentro_do_escopo`), então trocar a raiz por ensaio troca o mundo
-   do agente sem mexer em mais nada.
+1. O app roda inteiro sem nada além da CLI do Claude Code e do Git, e **diz na
+   barra** quando falta um dos dois. Metade do onboarding é isso: detectar e
+   contar, em vez de quebrar.
+2. `AdaptadorClaude::detectar` já é a sonda que o onboarding precisa, e
+   `MUTIRAO_CLAUDE_BIN` já cobre a CLI fora do PATH — comum no Windows, onde
+   ela vira um `.cmd` numa pasta do npm.
+3. As migrations já sobem sozinhas e são idempotentes, então atualizar o app
+   sobre um banco antigo é caminho testado desde a 002.
 
-O que precisa nascer: `git init` oculto na criação do workspace, `git worktree`
-por ensaio, a tela de publicar em linguagem de gente, e a escolha lado a lado
-para binário — que não faz merge, escolhe-se um lado.
+O que precisa nascer: instalador MSI/NSIS com auto-update, a tela de primeira
+abertura, e a escolha da pasta do workspace por diálogo do sistema.
 
-Dois cuidados que os marcos anteriores compraram caro:
+Três cuidados que os marcos anteriores compraram caro:
 
-- **O agente roda com `current_dir` na pasta do workspace.** Se o ensaio troca
-  a pasta, o adaptador precisa saber disso *antes* de abrir o processo, não
-  depois. Uma sessão viva apontando para o worktree errado grava no lugar
-  errado com aprovação legítima — o pior tipo de bug que este projeto pode ter.
-- **Publicar é irreversível para quem não conhece Git.** Vale o mesmo padrão do
-  card: mostrar o que muda antes, e não desfazer depois.
+- **Assinatura de código é opcional, não gratuita.** Sem ela o SmartScreen
+  reclama uma vez por máquina. Irritante para três máquinas, inviável para
+  trezentas — e a Decisão 4 diz que hoje são três.
+- **O auto-update mexe no app enquanto ele pode estar com agente rodando.**
+  Vale o mesmo padrão do `ensaios::trocar`: derrubar os processos antes, nunca
+  depois.
+- **A chave da API nunca entra no instalador.** Ela é lida do ambiente, e a
+  tela de primeira abertura tem de dizer isso em vez de pedir para colar.
 
 Escreva o roteiro novo para o adaptador falso no mesmo dia — é ele que mantém
 o custo de cada iteração em zero.
