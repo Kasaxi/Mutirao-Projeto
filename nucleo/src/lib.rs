@@ -2148,4 +2148,536 @@ mod testes {
         assert!(linha.contains("--mcp-config"), "sem ponte: {linha}");
         assert!(linha.contains("mcp__mutirao__enviar_para"), "a ponte não foi nomeada: {linha}");
     }
+
+    // ================================================================ M4 ===
+    // Papéis e times. O que transforma quatro agentes iguais num time.
+
+    use crate::papeis;
+    use crate::partituras;
+
+    /// Bancada do M4: um workspace com a biblioteca de papéis já semeada
+    /// (`Banco::preparar` faz isso) e um Organizador pronto para montar time.
+    struct Elenco {
+        banco: Arc<Mutex<Banco>>,
+        orq: Arc<Orquestrador>,
+        chefe: Sessao,
+        ws: String,
+        avisos: Arc<Mutex<Vec<EventoNucleo>>>,
+        _pasta: Pasta,
+    }
+
+    fn elenco() -> Elenco {
+        let pasta = Pasta::nova();
+        let banco = Banco::em_memoria().unwrap();
+        let ws = banco.criar_workspace("Obra", pasta.0.to_str().unwrap()).unwrap();
+        let organizador = banco.papel_por_nome("Organizador").unwrap().expect("papel embutido");
+        let no = banco
+            .criar_no_recrutado(
+                &ws.id,
+                TipoNo::Agente,
+                "Chefe",
+                0.0,
+                0.0,
+                Some(&organizador.id),
+                None,
+            )
+            .unwrap();
+        let banco = Arc::new(Mutex::new(banco));
+
+        let avisos: Arc<Mutex<Vec<EventoNucleo>>> = Arc::new(Mutex::new(Vec::new()));
+        let copia = avisos.clone();
+        let sink: Sink = Arc::new(move |e| copia.lock().unwrap().push(e));
+
+        let orq = Arc::new(Orquestrador::novo(
+            banco.clone(),
+            Arc::new(FabricaFalsa::com_roteiro(roteiro_simples())),
+            sink,
+        ));
+        let chefe = orq.abrir_sessao(&no.id, Adaptador::Falso).unwrap();
+        banco.lock().unwrap().mudar_estado_sessao(&chefe.id, EstadoSessao::Pensando).unwrap();
+
+        Elenco { banco, orq, chefe, ws: ws.id, avisos, _pasta: pasta }
+    }
+
+    impl Elenco {
+        fn usar(&self, nome: &str, args: serde_json::Value) -> Resultado<serde_json::Value> {
+            ferramentas::executar(&self.orq, &self.banco, &self.chefe, nome, &args)
+        }
+
+        fn nos(&self) -> Vec<No> {
+            self.banco.lock().unwrap().listar_nos(&self.ws).unwrap()
+        }
+    }
+
+    // ---- a biblioteca ----------------------------------------------------
+
+    #[test]
+    fn a_biblioteca_de_papeis_vem_junto_e_semear_duas_vezes_nao_duplica() {
+        let b = Banco::em_memoria().unwrap();
+        let quantos = b.listar_papeis().unwrap().len();
+        assert_eq!(quantos, papeis::embutidos().len(), "a biblioteca não subiu inteira");
+
+        // `Banco::preparar` já semeou; semear de novo é o que acontece a cada
+        // abertura do app.
+        assert_eq!(papeis::semear(&b).unwrap(), 0, "semeou de novo");
+        assert_eq!(b.listar_papeis().unwrap().len(), quantos);
+
+        // Todos vêm marcados como embutidos, e todos dizem alguma coisa.
+        for p in b.listar_papeis().unwrap() {
+            assert!(p.embutido, "{} não veio marcado", p.nome);
+            assert!(p.prompt.len() > 80, "prompt curto demais em {}", p.nome);
+        }
+    }
+
+    #[test]
+    fn embutido_nao_se_apaga_e_a_mensagem_diz_o_que_fazer() {
+        let b = Banco::em_memoria().unwrap();
+        let p = b.papel_por_nome("Redator").unwrap().unwrap();
+        let e = b.remover_papel(&p.id).expect_err("embutido não devia sumir");
+        assert!(e.to_string().contains("Duplique"), "{e}");
+
+        // O que a pessoa cria, a pessoa apaga.
+        let meu = b
+            .criar_papel("Meu jeito", "Você faz do meu jeito.", &[], Autonomia::Padrao, None, false)
+            .unwrap();
+        assert!(b.remover_papel(&meu.id).is_ok());
+    }
+
+    #[test]
+    fn apagar_papel_deixa_o_no_sem_papel_em_vez_de_levar_a_conversa_junto() {
+        let b = Banco::em_memoria().unwrap();
+        let ws = b.criar_workspace("Obra", "/tmp/obra-papel").unwrap();
+        let p = b
+            .criar_papel("Temporário", "Você é temporário.", &[], Autonomia::Padrao, None, false)
+            .unwrap();
+        let no = b
+            .criar_no_recrutado(&ws.id, TipoNo::Agente, "A", 0.0, 0.0, Some(&p.id), None)
+            .unwrap();
+        let s = b.criar_sessao(&no.id, Adaptador::Falso).unwrap();
+        b.gravar_mensagem(&s.id, PapelMensagem::Usuario, "oi", Uso::default()).unwrap();
+
+        assert_eq!(b.quantos_usam_o_papel(&p.id).unwrap(), 1);
+        b.remover_papel(&p.id).unwrap();
+
+        // O nó continua, a conversa continua, o papel some.
+        let depois = b.obter_no(&no.id).unwrap();
+        assert_eq!(depois.role_id, None);
+        assert_eq!(b.historico(&s.id, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_escada_de_autonomia_nunca_pula_o_card() {
+        // O `ARQUITETURA.md §8` em forma de teste: nenhum nível de autonomia
+        // pode fazer uma gravação passar sem aprovação. O que a escada muda é
+        // o que o papel ALCANÇA, não o que ele contorna.
+        for nivel in [Autonomia::Cauteloso, Autonomia::Padrao, Autonomia::Solto] {
+            let papel = Papel {
+                id: "x".into(),
+                nome: "N".into(),
+                prompt: "p".into(),
+                ferramentas: vec![],
+                autonomia: nivel,
+                modelo: None,
+                embutido: false,
+                criado_em: 0,
+            };
+            for f in papeis::ferramentas_do_papel(Some(&papel)) {
+                if ferramentas::FERRAMENTAS_QUE_GRAVAM.contains(&f.as_str()) {
+                    assert!(
+                        crate::barramento::pede_licenca(&ferramentas::nome_completo(&f)),
+                        "{f} escapou do card em {nivel:?}"
+                    );
+                }
+            }
+            // E o Bash, quando existe, nunca aceita "não perguntar de novo".
+            if papeis::nativas(nivel).contains(&"Bash") {
+                assert!(!crate::barramento::aceita_regra("Bash"));
+            }
+        }
+    }
+
+    #[test]
+    fn cauteloso_nao_grava_e_solto_roda_comando() {
+        let com = |a| Papel {
+            id: "x".into(),
+            nome: "N".into(),
+            prompt: "p".into(),
+            ferramentas: vec![],
+            autonomia: a,
+            modelo: None,
+            embutido: false,
+            criado_em: 0,
+        };
+
+        let cauteloso = papeis::ferramentas_do_papel(Some(&com(Autonomia::Cauteloso)));
+        assert!(!cauteloso.contains(&"escrever_nota".to_string()));
+        assert!(cauteloso.contains(&"enviar_para".to_string()), "conversar vale em todo nível");
+        assert!(!papeis::nativas(Autonomia::Cauteloso).contains(&"Write"));
+
+        let padrao = papeis::ferramentas_do_papel(Some(&com(Autonomia::Padrao)));
+        assert!(padrao.contains(&"escrever_nota".to_string()));
+        assert!(!papeis::nativas(Autonomia::Padrao).contains(&"Bash"));
+
+        assert!(papeis::nativas(Autonomia::Solto).contains(&"Bash"));
+    }
+
+    #[test]
+    fn o_papel_estreita_a_lista_da_autonomia_mas_nunca_a_alarga() {
+        // Se pudesse alargar, `cauteloso` deixaria de querer dizer alguma
+        // coisa — e um nome que não quer dizer nada dá confiança sem base.
+        let esperto = Papel {
+            id: "x".into(),
+            nome: "N".into(),
+            prompt: "p".into(),
+            // Pede escrita e time, sendo cauteloso.
+            ferramentas: vec![
+                "ler_nota".into(),
+                "escrever_nota".into(),
+                "escrever_arquivo".into(),
+            ],
+            autonomia: Autonomia::Cauteloso,
+            modelo: None,
+            embutido: false,
+            criado_em: 0,
+        };
+        let tem = papeis::ferramentas_do_papel(Some(&esperto));
+        assert_eq!(tem, vec!["ler_nota".to_string()], "a autonomia foi contornada: {tem:?}");
+    }
+
+    #[test]
+    fn so_quem_tem_a_ferramenta_monta_time() {
+        let b = Banco::em_memoria().unwrap();
+        let organizador = b.papel_por_nome("Organizador").unwrap().unwrap();
+        let redator = b.papel_por_nome("Redator").unwrap().unwrap();
+        assert!(papeis::pode_recrutar(Some(&organizador)));
+        assert!(!papeis::pode_recrutar(Some(&redator)), "o Redator não monta time");
+        // E um nó sem papel também não: recrutar é função, não padrão de fábrica.
+        assert!(!papeis::pode_recrutar(None));
+        assert!(!papeis::ferramentas_do_papel(None).contains(&"recrutar".to_string()));
+    }
+
+    // ---- o escopo do papel vale no servidor, não só na CLI ---------------
+
+    #[test]
+    fn o_papel_barra_a_ferramenta_mesmo_chamada_direto_pelo_mcp() {
+        // O `--tools` da CLI esconde o resto, mas esconder não é impedir: um
+        // `tools/call` chega por HTTP e quem monta o corpo é o processo do
+        // agente. Este teste bate na porta por fora.
+        let e = elenco();
+        let papel_sem_escrita = {
+            let b = e.banco.lock().unwrap();
+            b.papel_por_nome("Pesquisador").unwrap().unwrap()
+        };
+        e.banco
+            .lock()
+            .unwrap()
+            .definir_papel_do_no(&e.chefe.node_id, Some(&papel_sem_escrita.id))
+            .unwrap();
+
+        let token = e.banco.lock().unwrap().token_da_sessao(&e.chefe.id).unwrap();
+        let r = crate::mcp::tratar(
+            &e.orq,
+            &e.banco,
+            &token,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "escrever_arquivo",
+                    "arguments": { "caminho": "nao-deveria.txt", "conteudo": "oi" },
+                },
+            })
+            .to_string(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&r.corpo).unwrap();
+        assert_eq!(v["result"]["isError"], true, "o Pesquisador gravou: {}", r.corpo);
+        // E o arquivo não existe. Recusar e gravar assim mesmo seria pior que
+        // não recusar.
+        assert!(!e._pasta.0.join("nao-deveria.txt").exists(), "gravou apesar do erro");
+    }
+
+    // ---- recrutar --------------------------------------------------------
+
+    #[test]
+    fn recrutar_poe_o_agente_no_canvas_ja_ligado_a_quem_recrutou() {
+        let e = elenco();
+        let nome = e
+            .usar("recrutar", serde_json::json!({ "papel": "Redator", "nome": "Redator" }))
+            .unwrap();
+        assert_eq!(nome["no"], "Redator");
+
+        let nos = e.nos();
+        let novo = nos.iter().find(|n| n.nome == "Redator").expect("o recrutado não apareceu");
+        assert_eq!(novo.tipo, TipoNo::Agente);
+        assert_eq!(novo.recrutado_por.as_deref(), Some(e.chefe.node_id.as_str()));
+
+        // Com papel, senão ele é um agente qualquer com nome bonito.
+        let papel = e.banco.lock().unwrap().obter_papel(novo.role_id.as_ref().unwrap()).unwrap();
+        assert_eq!(papel.nome, "Redator");
+
+        // E ligado: sem cabo o recrutado é uma ilha, e o §4 diz que sem cabo o
+        // nó não existe para ninguém.
+        let vizinhos =
+            e.banco.lock().unwrap().vizinhos(&e.chefe.node_id, TipoCabo::FalaCom).unwrap();
+        assert!(vizinhos.contains(&novo.id), "recrutou e não ligou");
+
+        // O canvas soube, senão o agente trabalha onde ninguém vê.
+        let avisou = e.avisos.lock().unwrap().iter().any(|a| {
+            matches!(a, EventoNucleo::CanvasMudou { workspace_id, .. } if workspace_id == &e.ws)
+        });
+        assert!(avisou, "o canvas não foi avisado");
+    }
+
+    #[test]
+    fn recrutar_com_papel_que_nao_existe_diz_quais_existem() {
+        let e = elenco();
+        let err = e
+            .usar("recrutar", serde_json::json!({ "papel": "Feiticeiro", "nome": "X" }))
+            .expect_err("papel inventado não devia passar");
+        assert!(err.to_string().contains("Pesquisador"), "não listou os que existem: {err}");
+    }
+
+    #[test]
+    fn nome_repetido_e_recusado_na_hora_de_recrutar() {
+        // Dois "Redator" quebram o `enviar_para`, que resolve vizinho pelo
+        // nome. Recusar aqui é melhor que descobrir quando o time trabalha.
+        let e = elenco();
+        e.usar("recrutar", serde_json::json!({ "papel": "Redator", "nome": "Ana" })).unwrap();
+        let err = e
+            .usar("recrutar", serde_json::json!({ "papel": "Revisor", "nome": "Ana" }))
+            .expect_err("nome repetido não devia passar");
+        assert!(err.to_string().contains("já existe"), "{err}");
+    }
+
+    #[test]
+    fn o_teto_de_recrutas_por_cadeia_para_o_time_de_crescer() {
+        // O quinto limite. Os quatro do M3 incidem sobre a conversa; nenhum
+        // deles impede um Maestro de recrutar cem num turno só.
+        let e = elenco();
+        // Um turno de verdade, para existir cadeia sobre a qual o teto incide.
+        let travada = Arc::new(FabricaTravada::nova());
+        let orq = Arc::new(Orquestrador::novo(e.banco.clone(), travada, sink_mudo()));
+        let chefe = orq.abrir_sessao(&e.chefe.node_id, Adaptador::Falso).unwrap();
+        e.banco.lock().unwrap().forcar_estado_sessao(&chefe.id, EstadoSessao::Ocioso).unwrap();
+        orq.enviar(&chefe.id, "monte o time").unwrap();
+        assert!(esperar(|| e.banco.lock().unwrap().obter_sessao(&chefe.id).unwrap().estado
+            == EstadoSessao::Pensando));
+
+        for i in 0..MAX_RECRUTAS_POR_CADEIA {
+            ferramentas::executar(
+                &orq,
+                &e.banco,
+                &chefe,
+                "recrutar",
+                &serde_json::json!({ "papel": "Redator", "nome": format!("R{i}") }),
+            )
+            .unwrap_or_else(|erro| panic!("recruta {i} devia passar: {erro}"));
+        }
+        let err = ferramentas::executar(
+            &orq,
+            &e.banco,
+            &chefe,
+            "recrutar",
+            &serde_json::json!({ "papel": "Redator", "nome": "Demais" }),
+        )
+        .expect_err("passou do teto");
+        assert!(err.to_string().contains("limite"), "{err}");
+        assert!(e.nos().iter().all(|n| n.nome != "Demais"), "criou apesar do erro");
+    }
+
+    #[test]
+    fn o_teto_por_workspace_pega_o_que_o_teto_por_cadeia_nao_pega() {
+        // Três hoje, três amanhã, três depois: cada turno abre uma cadeia
+        // nova, e o teto por cadeia zera junto.
+        let e = elenco();
+        let banco = e.banco.lock().unwrap();
+        for i in 0..MAX_AGENTES_POR_WORKSPACE {
+            let _ = banco.criar_no(&e.ws, TipoNo::Agente, &format!("Enchendo {i}"), 0.0, 0.0);
+        }
+        drop(banco);
+        let err = e
+            .usar("recrutar", serde_json::json!({ "papel": "Redator", "nome": "Gota d'água" }))
+            .expect_err("passou do teto do workspace");
+        assert!(err.to_string().contains("dispensar"), "não diz o que fazer: {err}");
+    }
+
+    // ---- dispensar -------------------------------------------------------
+
+    #[test]
+    fn dispensar_encerra_a_sessao_e_nao_apaga_o_no() {
+        // Apagar levaria a conversa junto por CASCADE. Destruir trabalho por
+        // conta de um agente é o oposto do §8 — quem apaga nó é a pessoa.
+        let e = elenco();
+        e.usar("recrutar", serde_json::json!({ "papel": "Redator", "nome": "Bia" })).unwrap();
+        let bia = e.nos().into_iter().find(|n| n.nome == "Bia").unwrap();
+        let sessao = e.orq.abrir_sessao(&bia.id, Adaptador::Falso).unwrap();
+        e.banco
+            .lock()
+            .unwrap()
+            .gravar_mensagem(&sessao.id, PapelMensagem::Agente, "meu trabalho", Uso::default())
+            .unwrap();
+
+        e.usar("dispensar", serde_json::json!({ "no": "Bia" })).unwrap();
+
+        assert!(e.nos().iter().any(|n| n.nome == "Bia"), "o nó foi apagado");
+        let conversa = e.banco.lock().unwrap().historico(&sessao.id, 20).unwrap();
+        assert!(
+            conversa.iter().any(|m| m.conteudo == "meu trabalho"),
+            "a conversa foi levada junto"
+        );
+        assert!(
+            conversa.iter().any(|m| m.conteudo.contains("Dispensado")),
+            "não registrou o que houve: {conversa:?}"
+        );
+    }
+
+    #[test]
+    fn so_quem_recrutou_dispensa() {
+        let e = elenco();
+        // Um nó que a PESSOA criou, ligado ao chefe.
+        let alheio = {
+            let b = e.banco.lock().unwrap();
+            let n = b.criar_no(&e.ws, TipoNo::Agente, "Da casa", 500.0, 0.0).unwrap();
+            b.criar_cabo(&e.ws, &e.chefe.node_id, &n.id, TipoCabo::FalaCom).unwrap();
+            n
+        };
+        let err = e
+            .usar("dispensar", serde_json::json!({ "no": "Da casa" }))
+            .expect_err("dispensou quem não recrutou");
+        assert!(err.to_string().contains("não recrutou"), "{err}");
+        assert!(e.nos().iter().any(|n| n.id == alheio.id));
+    }
+
+    // ---- partituras ------------------------------------------------------
+
+    #[test]
+    fn salvar_e_reabrir_devolve_o_mesmo_time() {
+        // O critério do M4 em forma de teste: "amanhã eu reabro o mesmo time
+        // como estava".
+        let e = elenco();
+        e.usar("recrutar", serde_json::json!({ "papel": "Pesquisador", "nome": "Pesq" })).unwrap();
+        e.usar("recrutar", serde_json::json!({ "papel": "Redator", "nome": "Red" })).unwrap();
+        e.usar("recrutar", serde_json::json!({ "papel": "Revisor", "nome": "Rev" })).unwrap();
+
+        let (partitura, antes) = {
+            let b = e.banco.lock().unwrap();
+            let snap = partituras::fotografar(&b, &e.ws).unwrap();
+            (b.salvar_partitura(&e.ws, "Time do contrato", &snap).unwrap(), b.listar_nos(&e.ws).unwrap())
+        };
+        assert_eq!(partitura.snapshot.nos.len(), 4, "o chefe e os três recrutados");
+        assert!(!partitura.snapshot.cabos.is_empty(), "os cabos não foram junto");
+
+        // Abre num workspace limpo — que é o teste de verdade de "reabrir",
+        // porque prova que a partitura não depende dos ids de onde nasceu.
+        let outro = Pasta::nova();
+        let novos = {
+            let b = e.banco.lock().unwrap();
+            let ws2 = b.criar_workspace("Outra obra", outro.0.to_str().unwrap()).unwrap();
+            partituras::montar(&b, &ws2.id, &partitura).unwrap()
+        };
+
+        assert_eq!(novos.len(), antes.len());
+        let nomes: Vec<&str> = novos.iter().map(|n| n.nome.as_str()).collect();
+        for esperado in ["Chefe", "Pesq", "Red", "Rev"] {
+            assert!(nomes.contains(&esperado), "faltou {esperado} em {nomes:?}");
+        }
+        // Com os papéis certos, senão é um time de estranhos com os nomes certos.
+        let b = e.banco.lock().unwrap();
+        let red = novos.iter().find(|n| n.nome == "Red").unwrap();
+        let papel = b.obter_papel(red.role_id.as_ref().unwrap()).unwrap();
+        assert_eq!(papel.nome, "Redator");
+        // E ligados entre si.
+        assert!(!b.listar_cabos(&red.workspace_id).unwrap().is_empty());
+        // Ids novos: reabrir cria, não restaura por cima.
+        assert!(novos.iter().all(|n| antes.iter().all(|a| a.id != n.id)));
+    }
+
+    #[test]
+    fn partitura_nao_leva_conversa_nem_custo() {
+        // Ela é a planta do time, não um backup dele.
+        let e = elenco();
+        e.banco
+            .lock()
+            .unwrap()
+            .gravar_mensagem(&e.chefe.id, PapelMensagem::Agente, "segredo", Uso::default())
+            .unwrap();
+        let snap = partituras::fotografar(&e.banco.lock().unwrap(), &e.ws).unwrap();
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(!json.contains("segredo"), "a conversa foi junto: {json}");
+        assert!(!json.contains("custo"), "o custo foi junto");
+        // E nada de id: o id pertence ao canvas onde o nó vive.
+        assert!(!json.contains(&e.chefe.node_id), "o id do nó foi junto");
+    }
+
+    #[test]
+    fn reabrir_no_mesmo_workspace_nao_empilha_nem_repete_nome() {
+        let e = elenco();
+        e.usar("recrutar", serde_json::json!({ "papel": "Redator", "nome": "Red" })).unwrap();
+
+        let partitura = {
+            let b = e.banco.lock().unwrap();
+            let snap = partituras::fotografar(&b, &e.ws).unwrap();
+            b.salvar_partitura(&e.ws, "Time", &snap).unwrap()
+        };
+        let novos = {
+            let b = e.banco.lock().unwrap();
+            partituras::montar(&b, &e.ws, &partitura).unwrap()
+        };
+
+        // Nomes desambiguados: dois "Red" quebrariam o `enviar_para`.
+        let nomes: Vec<&str> = novos.iter().map(|n| n.nome.as_str()).collect();
+        assert!(nomes.contains(&"Red 2"), "não desambiguou: {nomes:?}");
+        // E deslocados para a direita, em vez de exatamente em cima.
+        let antigo = e.nos().into_iter().find(|n| n.nome == "Red").unwrap();
+        let novo = novos.iter().find(|n| n.nome == "Red 2").unwrap();
+        assert!(novo.x > antigo.x, "caiu em cima do que já estava lá");
+    }
+
+    #[test]
+    fn salvar_com_o_mesmo_nome_atualiza_em_vez_de_dar_erro() {
+        // Quem repete o nome está atualizando o time, não descobrindo um
+        // índice único.
+        let e = elenco();
+        let banco = e.banco.lock().unwrap();
+        let um = partituras::fotografar(&banco, &e.ws).unwrap();
+        let p1 = banco.salvar_partitura(&e.ws, "Time", &um).unwrap();
+        banco.criar_no(&e.ws, TipoNo::Agente, "Mais um", 0.0, 0.0).unwrap();
+        let dois = partituras::fotografar(&banco, &e.ws).unwrap();
+        let p2 = banco.salvar_partitura(&e.ws, "Time", &dois).unwrap();
+
+        assert_eq!(p1.id, p2.id, "criou uma segunda linha em vez de atualizar");
+        assert_eq!(p2.snapshot.nos.len(), um.nos.len() + 1);
+        assert_eq!(banco.listar_partituras(&e.ws).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn papel_que_nao_existe_na_maquina_nao_derruba_o_time_inteiro() {
+        // Recusar a partitura por causa de um papel apagado seria perder o
+        // time todo por um detalhe que se conserta em dois cliques.
+        let e = elenco();
+        let partitura = Partitura {
+            id: "p".into(),
+            workspace_id: e.ws.clone(),
+            nome: "Importado".into(),
+            snapshot: Snapshot {
+                nos: vec![NoSalvo {
+                    tipo: TipoNo::Agente,
+                    nome: "Estranho".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 320.0,
+                    h: 240.0,
+                    config: serde_json::json!({}),
+                    papel: Some("Papel De Outra Máquina".into()),
+                }],
+                cabos: vec![],
+            },
+            criado_em: 0,
+        };
+        let novos = {
+            let b = e.banco.lock().unwrap();
+            partituras::montar(&b, &e.ws, &partitura).unwrap()
+        };
+        assert_eq!(novos.len(), 1);
+        assert_eq!(novos[0].role_id, None, "inventou um papel");
+    }
 }

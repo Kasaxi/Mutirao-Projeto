@@ -18,9 +18,12 @@ import {
   type EstadoCanvas,
   type EstadoSessao,
   type EventoCadeiaEncerrada,
+  type EventoCanvasMudou,
   type EventoCusto,
   type EventoNoMensagem,
   type No,
+  type Papel,
+  type Partitura,
   type TipoNo,
   type Viewport,
 } from "./lib/tipos";
@@ -57,6 +60,9 @@ export default function App() {
   const [recados, setRecados] = useState<Recado[]>([]);
   /** Cadeias que acabaram por limite. Ficam na tela até alguém fechar. */
   const [cadeias, setCadeias] = useState<EventoCadeiaEncerrada[]>([]);
+  /** A biblioteca de papéis, carregada uma vez. */
+  const [papeis, setPapeis] = useState<Papel[]>([]);
+  const [times, setTimes] = useState<Partitura[]>([]);
   // Quem está de fato respondendo. Vem do backend, não de uma constante daqui:
   // é ele que sabe se achou o Claude Code na máquina.
   const [agente, setAgente] = useState<{ adaptador: Adaptador; detalhe: string } | null>(null);
@@ -199,6 +205,57 @@ export default function App() {
     };
   }, []);
 
+  // A biblioteca de papéis. Carregada uma vez: ela muda quando o usuário mexe
+  // nela, e aí quem mexeu atualiza a lista.
+  useEffect(() => {
+    let vivo = true;
+    ipc
+      .listarPapeis()
+      .then((p) => vivo && setPapeis(p))
+      .catch(() => {
+        /* sem papéis o app continua servindo; o seletor fica só com "sem papel" */
+      });
+    return () => {
+      vivo = false;
+    };
+  }, []);
+
+  const recarregarCanvas = useCallback(async () => {
+    const est = estadoRef.current;
+    if (!est) return;
+    try {
+      setEstado(await ipc.abrirWorkspace(est.workspace.id));
+    } catch (err) {
+      setAviso(mensagem(err));
+    }
+  }, []);
+
+  // Um agente recrutou outro: o canvas mudou por fora da interface. Sem relê-lo
+  // aqui, o nó novo existe no banco e não na tela — um agente trabalhando onde
+  // ninguém vê, que é a pior coisa que este marco poderia produzir.
+  useEffect(() => {
+    if (!estado) return;
+    const ws = estado.workspace.id;
+    let vivo = true;
+    let parar: (() => void) | null = null;
+
+    ipc
+      .listarTimes(ws)
+      .then((t) => vivo && setTimes(t))
+      .catch(() => {});
+
+    escutar<EventoCanvasMudou>("canvas:mudou", (p) => {
+      if (p.workspace_id !== ws) return;
+      void recarregarCanvas();
+      setAviso(p.motivo);
+    }).then((f) => (vivo ? (parar = f) : f()));
+
+    return () => {
+      vivo = false;
+      parar?.();
+    };
+  }, [estado?.workspace.id, recarregarCanvas]);
+
   // --------------------------------------------------------------- ações
 
   const patch = useCallback((id: string, campos: Partial<No>) => {
@@ -206,6 +263,47 @@ export default function App() {
       e ? { ...e, nos: e.nos.map((n) => (n.id === id ? { ...n, ...campos } : n)) } : e,
     );
   }, []);
+
+  const trocarPapel = useCallback(
+    async (nodeId: string, roleId: string | null) => {
+      try {
+        const atualizado = await ipc.definirPapelDoNo(nodeId, roleId);
+        patch(nodeId, { role_id: atualizado.role_id });
+      } catch (err) {
+        setAviso(mensagem(err));
+      }
+    },
+    [patch],
+  );
+
+  const salvarTime = useCallback(async () => {
+    const est = estadoRef.current;
+    if (!est) return;
+    const nome = window.prompt("Nome para este time:", est.workspace.nome);
+    if (!nome?.trim()) return;
+    try {
+      await ipc.salvarTime(est.workspace.id, nome.trim());
+      setTimes(await ipc.listarTimes(est.workspace.id));
+      setAviso(`Time "${nome.trim()}" salvo. Ele guarda quem trabalha e como está ligado — não a conversa.`);
+    } catch (err) {
+      setAviso(mensagem(err));
+    }
+  }, []);
+
+  const abrirTime = useCallback(
+    async (id: string) => {
+      const est = estadoRef.current;
+      if (!est) return;
+      try {
+        const novos = await ipc.abrirTime(est.workspace.id, id);
+        await recarregarCanvas();
+        setAviso(`${novos.length} nó(s) montados. O time está pronto para trabalhar de novo.`);
+      } catch (err) {
+        setAviso(mensagem(err));
+      }
+    },
+    [recarregarCanvas],
+  );
 
   const adicionar = useCallback(
     async (tipo: TipoNo) => {
@@ -442,7 +540,7 @@ export default function App() {
       <header className="barra">
         <div className="marca">
           Mutirão
-          <span className="versao">M3</span>
+          <span className="versao">M4</span>
         </div>
 
         <div className="ferramentas">
@@ -457,6 +555,32 @@ export default function App() {
           <button onClick={remover} disabled={!selecionado} title="Delete">
             Remover
           </button>
+          <span className="divisor" />
+          {/* O time salvo. Guarda quem trabalha e como está ligado — a
+              conversa fica onde está, porque partitura não é backup. */}
+          <button onClick={() => void salvarTime()} title="Guarda o time para reabrir depois">
+            Salvar time
+          </button>
+          <select
+            className="abrir-time"
+            value=""
+            disabled={times.length === 0}
+            title={
+              times.length === 0
+                ? "Nenhum time salvo ainda"
+                : "Monta o time de novo, com os mesmos papéis e cabos"
+            }
+            onChange={(e) => {
+              if (e.target.value) void abrirTime(e.target.value);
+            }}
+          >
+            <option value="">{times.length === 0 ? "sem times" : "Abrir time…"}</option>
+            {times.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.nome} ({t.snapshot.nos.length})
+              </option>
+            ))}
+          </select>
         </div>
 
         <div className="direita">
@@ -516,6 +640,8 @@ export default function App() {
               estadoSessao={estadosSessao[n.id]}
               aoMudarEstadoSessao={(e) => registrarEstadoSessao(n.id, e)}
               nomesDosNos={nomesDosNos}
+              papeis={papeis}
+              aoTrocarPapel={(roleId) => void trocarPapel(n.id, roleId)}
               aoSelecionar={() => {
                 setSelecionado(n.id);
                 void ipc

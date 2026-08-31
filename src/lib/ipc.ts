@@ -1,5 +1,6 @@
 import type {
   Adaptador,
+  Autonomia,
   Cabo,
   ChamadaFerramenta,
   CustoDoNo,
@@ -12,6 +13,8 @@ import type {
   No,
   Nota,
   PapelMensagem,
+  Papel,
+  Partitura,
   PedidoAprovacao,
   RegraAprovacao,
   Sessao,
@@ -116,6 +119,45 @@ export const ipc = {
 
   aprovacoesPendentes: (sessionId: string) =>
     chamar<PedidoAprovacao[]>("aprovacoes_pendentes", { sessionId }),
+
+  // ------------------------------------------------------ papéis e times
+
+  listarPapeis: () => chamar<Papel[]>("listar_papeis"),
+
+  criarPapel: (
+    nome: string,
+    prompt: string,
+    ferramentas: string[],
+    autonomia: Autonomia,
+    modelo: string | null,
+  ) => chamar<Papel>("criar_papel", { nome, prompt, ferramentas, autonomia, modelo }),
+
+  editarPapel: (
+    id: string,
+    prompt: string,
+    ferramentas: string[],
+    autonomia: Autonomia,
+    modelo: string | null,
+  ) => chamar<Papel>("editar_papel", { id, prompt, ferramentas, autonomia, modelo }),
+
+  removerPapel: (id: string) => chamar<void>("remover_papel", { id }),
+
+  quantosUsamOPapel: (id: string) => chamar<number>("quantos_usam_o_papel", { id }),
+
+  /** `roleId` nulo tira o papel: o nó volta a ser um agente sem papel. */
+  definirPapelDoNo: (nodeId: string, roleId: string | null) =>
+    chamar<No>("definir_papel_do_no", { nodeId, roleId }),
+
+  salvarTime: (workspaceId: string, nome: string) =>
+    chamar<Partitura>("salvar_time", { workspaceId, nome }),
+
+  listarTimes: (workspaceId: string) =>
+    chamar<Partitura[]>("listar_times", { workspaceId }),
+
+  abrirTime: (workspaceId: string, partituraId: string) =>
+    chamar<No[]>("abrir_time", { workspaceId, partituraId }),
+
+  removerTime: (id: string) => chamar<void>("remover_time", { id }),
 };
 
 /**
@@ -152,9 +194,40 @@ const mem = {
   mensagens: [] as Mensagem[],
   acoes: [] as ChamadaFerramenta[],
   regras: [] as RegraAprovacao[],
+  papeis: [] as Papel[],
+  times: [] as Partitura[],
   /** Sistema de arquivos de mentira: caminho relativo -> conteúdo. */
   arquivos: new Map<string, string>(),
 };
+
+/**
+ * Espelho de `papeis::embutidos()`. Só nome, autonomia e uma frase do prompt:
+ * o modo navegador precisa de papéis para a interface ter o que mostrar, não
+ * dos prompts inteiros — quem os usa de verdade é o Rust.
+ */
+const PAPEIS_EMBUTIDOS: Array<[string, Autonomia, string]> = [
+  ["Pesquisador", "cauteloso", "Acha e entende material. Não escreve arquivo nem nota."],
+  ["Redator", "padrao", "Transforma material bruto em texto que uma pessoa leia sem esforço."],
+  ["Revisor", "cauteloso", "Acha o que está errado antes que chegue a quem pediu."],
+  ["Analista", "solto", "Planilha, conversão, conferência de número. Roda comando com aprovação."],
+  ["Organizador", "padrao", "Monta o time e reparte o trabalho — não faz o trabalho."],
+];
+
+function semearPapeis() {
+  if (mem.papeis.length) return;
+  for (const [nome, autonomia, prompt] of PAPEIS_EMBUTIDOS) {
+    mem.papeis.push({
+      id: id(),
+      nome,
+      prompt,
+      ferramentas: nome === "Organizador" ? ["recrutar", "dispensar", "enviar_para"] : [],
+      autonomia,
+      modelo: null,
+      embutido: true,
+      criado_em: agora(),
+    });
+  }
+}
 
 /** A pasta de exemplo do modo navegador, para a árvore ter o que mostrar. */
 function semearArquivos() {
@@ -575,6 +648,8 @@ function semear() {
       h,
       z: mem.nos.length + 1,
       config: {},
+      role_id: null,
+      recrutado_por: null,
       criado_em: agora(),
       alterado_em: agora(),
     };
@@ -600,6 +675,7 @@ function cabo(ws: string, de: string, para: string, tipo: TipoCabo): Cabo {
 
 async function falso<T>(comando: string, a: Record<string, any>): Promise<T> {
   semear();
+  semearPapeis();
   // O IPC de verdade serializa tudo que atravessa a fronteira, então o front
   // nunca compartilha objeto com o backend. O falso precisa imitar isso: sem
   // a cópia, o `push` daqui e o append no estado do React viram o MESMO
@@ -610,6 +686,113 @@ async function falso<T>(comando: string, a: Record<string, any>): Promise<T> {
   switch (comando) {
     case "listar_workspaces":
       return qualquer(mem.workspaces);
+
+    // ----------------------------------------------------- papéis e times
+
+    case "listar_papeis":
+      return qualquer(mem.papeis);
+
+    case "definir_papel_do_no": {
+      const n = mem.nos.find((k) => k.id === a.nodeId);
+      if (!n) throw { codigo: "nao_encontrado", mensagem: "nó não encontrado" };
+      n.role_id = a.roleId ?? null;
+      n.alterado_em = agora();
+      return qualquer(n);
+    }
+
+    case "salvar_time": {
+      const posicao = new Map(mem.nos.map((n, i) => [n.id, i]));
+      const p: Partitura = {
+        id: id(),
+        workspace_id: a.workspaceId,
+        nome: (a.nome as string).trim(),
+        snapshot: {
+          nos: mem.nos.map((n) => ({
+            tipo: n.tipo,
+            nome: n.nome,
+            x: n.x,
+            y: n.y,
+            w: n.w,
+            h: n.h,
+            config: n.config,
+            papel: mem.papeis.find((x) => x.id === n.role_id)?.nome ?? null,
+          })),
+          cabos: mem.cabos.flatMap((c) => {
+            const de = posicao.get(c.de_node);
+            const para = posicao.get(c.para_node);
+            return de === undefined || para === undefined ? [] : [{ de, para, tipo: c.tipo }];
+          }),
+        },
+        criado_em: agora(),
+      };
+      if (!p.nome) {
+        throw { codigo: "invalido", mensagem: "o time precisa de um nome para você achar depois" };
+      }
+      // Mesmo nome atualiza, como no Rust: quem repete está atualizando o
+      // time, não descobrindo um índice único.
+      const anterior = mem.times.find(
+        (t) => t.workspace_id === p.workspace_id && t.nome === p.nome,
+      );
+      if (anterior) {
+        Object.assign(anterior, p, { id: anterior.id });
+        return qualquer(anterior);
+      }
+      mem.times.push(p);
+      return qualquer(p);
+    }
+
+    case "listar_times":
+      return qualquer(mem.times.filter((t) => t.workspace_id === a.workspaceId));
+
+    case "remover_time": {
+      mem.times = mem.times.filter((t) => t.id !== a.id);
+      return qualquer(undefined);
+    }
+
+    case "abrir_time": {
+      const p = mem.times.find((t) => t.id === a.partituraId);
+      if (!p) throw { codigo: "nao_encontrado", mensagem: "time salvo não encontrado" };
+      const usados = mem.nos.map((n) => n.nome.trim().toLowerCase());
+      // Mesmo deslocamento do `partituras::deslocamento`: o time volta à
+      // direita do que já existe, mantendo a FORMA que tinha. Empilhar em
+      // diagonal perderia justamente o que a partitura guarda — quem está
+      // perto de quem.
+      const direita = mem.nos.length ? Math.max(...mem.nos.map((n) => n.x + n.w)) : 0;
+      const esquerdaDoTime = Math.min(...p.snapshot.nos.map((n) => n.x));
+      const dx = mem.nos.length ? direita + 80 - esquerdaDoTime : 0;
+      const criados: No[] = p.snapshot.nos.map((salvo, i) => {
+        let nome = salvo.nome;
+        for (let k = 2; usados.includes(nome.trim().toLowerCase()); k++) {
+          nome = `${salvo.nome} ${k}`;
+        }
+        usados.push(nome.trim().toLowerCase());
+        const n: No = {
+          id: id(),
+          workspace_id: a.workspaceId,
+          ensaio_id: null,
+          tipo: salvo.tipo,
+          nome,
+          x: salvo.x + dx,
+          y: salvo.y,
+          w: salvo.w,
+          h: salvo.h,
+          z: Math.max(0, ...mem.nos.map((k) => k.z)) + 1 + i,
+          config: salvo.config ?? {},
+          role_id: mem.papeis.find((x) => x.nome === salvo.papel)?.id ?? null,
+          recrutado_por: null,
+          criado_em: agora(),
+          alterado_em: agora(),
+        };
+        mem.nos.push(n);
+        return n;
+      });
+      for (const c of p.snapshot.cabos) {
+        const de = criados[c.de];
+        const para = criados[c.para];
+        if (de && para) mem.cabos.push(cabo(a.workspaceId, de.id, para.id, c.tipo));
+      }
+      return qualquer(criados);
+    }
 
     case "abrir_workspace": {
       const ws = mem.workspaces.find((w) => w.id === a.workspaceId);
@@ -641,6 +824,8 @@ async function falso<T>(comando: string, a: Record<string, any>): Promise<T> {
         h,
         z: Math.max(0, ...mem.nos.map((k) => k.z)) + 1,
         config: {},
+        role_id: null,
+        recrutado_por: null,
         criado_em: agora(),
         alterado_em: agora(),
       };

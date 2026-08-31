@@ -654,6 +654,48 @@ button.arvore-item:hover {
   padding: 6px 8px;
 }
 
+/* ------------------------------------------------------------------ papéis */
+
+/* O papel no cabeçalho do nó. Discreto quando está definido, apagado quando
+   não está: "sem papel" é um estado legítimo, não um erro a corrigir. */
+.no-papel {
+  max-width: 110px;
+  padding: 1px 2px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 10.5px;
+  color: var(--acento);
+  cursor: pointer;
+}
+
+.no-papel:hover,
+.no-papel:focus {
+  border-color: var(--borda-forte);
+  outline: none;
+}
+
+.no-papel.vazio {
+  color: var(--texto-apagado);
+}
+
+.abrir-time {
+  padding: 3px 6px;
+  background: var(--superficie);
+  border: 1px solid var(--borda);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--texto);
+  cursor: pointer;
+}
+
+.abrir-time:disabled {
+  color: var(--texto-apagado);
+  cursor: default;
+}
+
 .bolha-origem {
   display: block;
   margin-bottom: 3px;

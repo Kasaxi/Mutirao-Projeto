@@ -40,6 +40,10 @@ export interface No {
   h: number;
   z: number;
   config: Record<string, unknown>;
+  /** Papel deste agente. `null` = agente sem papel, como todo nó até o M4. */
+  role_id: string | null;
+  /** Quem recrutou. `null` = foi uma pessoa que criou este nó. */
+  recrutado_por: string | null;
   criado_em: number;
   alterado_em: number;
 }
@@ -255,6 +259,76 @@ export interface EventoCadeiaEncerrada {
   tipo: "cadeia_encerrada";
   trace_id: string;
   node_id: string;
+  motivo: string;
+}
+
+// ============================================================ M4: papéis ===
+
+/**
+ * Quanto o papel pode fazer sozinho.
+ *
+ * A autonomia escolhe o **conjunto de ferramentas**, nunca se o card aparece.
+ * Um papel `solto` grava com card igual a um `padrao`; ele só alcança mais
+ * coisa. Ver `papeis.rs` e o `ARQUITETURA.md §8`.
+ */
+export type Autonomia = "cauteloso" | "padrao" | "solto";
+
+export interface Papel {
+  id: string;
+  nome: string;
+  prompt: string;
+  ferramentas: string[];
+  autonomia: Autonomia;
+  modelo: string | null;
+  /** Veio com o app. Dá para editar, não dá para apagar. */
+  embutido: boolean;
+  criado_em: number;
+}
+
+export const ROTULO_AUTONOMIA: Record<Autonomia, string> = {
+  cauteloso: "só lê e conversa",
+  padrao: "grava, com aprovação",
+  solto: "grava e roda comando, com aprovação",
+};
+
+/**
+ * Um nó dentro de uma partitura. Espelha `modelo::NoSalvo`.
+ *
+ * Sem id de propósito: o id pertence ao canvas onde o nó vive, e reabrir cria
+ * nós novos. O papel vai pelo **nome**, para a partitura abrir noutra máquina
+ * onde o mesmo papel tem outro id.
+ */
+export interface NoSalvo {
+  tipo: TipoNo;
+  nome: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  config: Record<string, unknown>;
+  papel: string | null;
+}
+
+/** Um time salvo. Guarda quem trabalha e como está ligado, não a conversa. */
+export interface Partitura {
+  id: string;
+  workspace_id: string;
+  nome: string;
+  snapshot: {
+    nos: NoSalvo[];
+    /** Pelos índices em `nos`, porque os ids não sobrevivem à travessia. */
+    cabos: Array<{ de: number; para: number; tipo: TipoCabo }>;
+  };
+  criado_em: number;
+}
+
+/**
+ * O canvas mudou por fora da interface — hoje só quando um agente recruta
+ * outro. O front relê o workspace ao ver isto.
+ */
+export interface EventoCanvasMudou {
+  tipo: "canvas_mudou";
+  workspace_id: string;
   motivo: string;
 }
 

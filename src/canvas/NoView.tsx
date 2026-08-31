@@ -5,6 +5,7 @@ import {
   ROTULO_NO,
   type EstadoSessao,
   type No,
+  type Papel,
 } from "../lib/tipos";
 import { Arquivos } from "./Arquivos";
 import { Conversa } from "./Conversa";
@@ -23,6 +24,9 @@ interface Props {
   aoMudarEstadoSessao?: (estado: EstadoSessao) => void;
   /** Nome de cada nó, para a bolha vinda de outro nó dizer de quem ela é. */
   nomesDosNos?: Record<string, string>;
+  /** A biblioteca inteira, para o seletor de papel do cabeçalho. */
+  papeis?: Papel[];
+  aoTrocarPapel?: (roleId: string | null) => void;
 }
 
 export function NoView({
@@ -36,6 +40,8 @@ export function NoView({
   aoRenomear,
   aoMudarEstadoSessao,
   nomesDosNos,
+  papeis,
+  aoTrocarPapel,
 }: Props) {
   const [editando, setEditando] = useState(false);
 
@@ -75,6 +81,15 @@ export function NoView({
           <span className="no-nome" title="Dois cliques para renomear">
             {no.nome}
           </span>
+        )}
+
+        {no.tipo === "agente" && papeis && aoTrocarPapel && (
+          <SeletorPapel
+            papeis={papeis}
+            atual={no.role_id}
+            recrutado={no.recrutado_por !== null}
+            aoTrocar={aoTrocarPapel}
+          />
         )}
 
         {estadoSessao && (
@@ -169,4 +184,56 @@ function Corpo({
     case "forma":
       return <div className="maquete forma" />;
   }
+}
+
+/**
+ * O papel do nó, no cabeçalho e trocável ali mesmo.
+ *
+ * Um `<select>` e não um menu bonito: papel é escolha entre poucas opções
+ * conhecidas, que é exatamente o que um select faz bem — e ele já vem com
+ * teclado, leitor de tela e o comportamento que o sistema operacional dá.
+ *
+ * "sem papel" continua sendo uma opção de verdade. Todo nó criado até o M4
+ * está assim, e forçar uma escolha na primeira abertura seria mudar o que o
+ * usuário já tinha sem ele pedir.
+ */
+function SeletorPapel({
+  papeis,
+  atual,
+  recrutado,
+  aoTrocar,
+}: {
+  papeis: Papel[];
+  atual: string | null;
+  recrutado: boolean;
+  aoTrocar: (roleId: string | null) => void;
+}) {
+  const papel = papeis.find((p) => p.id === atual);
+  return (
+    <select
+      className={`no-papel${papel ? "" : " vazio"}`}
+      value={atual ?? ""}
+      title={
+        papel
+          ? `${papel.nome}: ${papel.prompt.split("\n")[0]}`
+          : "Sem papel — prompt padrão e todas as ferramentas"
+      }
+      // O cabeçalho arrasta o nó; sem parar aqui, abrir o select viraria um
+      // arrasto de um pixel e o menu fecharia na cara do usuário.
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => aoTrocar(e.target.value || null)}
+    >
+      <option value="">sem papel</option>
+      {papeis.map((p) => (
+        <option key={p.id} value={p.id}>
+          {p.nome}
+        </option>
+      ))}
+      {/* Quem recrutou este nó foi outro agente. Vale dizer: um nó que
+          apareceu sozinho no canvas é a coisa mais estranha do M4 até você
+          entender de onde ele veio. */}
+      {recrutado && <option disabled>— recrutado por outro agente —</option>}
+    </select>
+  );
 }

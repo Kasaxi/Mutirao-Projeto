@@ -470,7 +470,10 @@ impl Orquestrador {
                 ))
             })?;
 
-            if banco.papel_por_nome(nome)?.is_some() || ja_existe_no(&banco, workspace_id, nome) {
+            // Só nome de NÓ conflita. Papel e nó vivem em espaços de nome
+            // diferentes, e chamar o agente de "Redator" porque ele é o
+            // Redator é a coisa mais natural que existe.
+            if ja_existe_no(&banco, workspace_id, nome) {
                 return Err(Erro::invalido(format!(
                     "já existe alguém chamado \"{nome}\" aqui; escolha outro nome"
                 )));

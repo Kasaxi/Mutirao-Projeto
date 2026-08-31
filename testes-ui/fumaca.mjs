@@ -412,6 +412,97 @@ conferir(
   (await arvore.locator(".arvore-nome").allInnerTexts())[0] === "contratos",
 );
 
+// ============================================================== M4 =========
+// "um prompt monta um time de quatro, e amanhã eu reabro o mesmo time como
+// estava". A interface tem de mostrar quem é quem, e guardar o time.
+
+console.log("\nM4 — papéis e times");
+
+await pagina.reload();
+await pagina.waitForSelector(".no");
+await pagina.getByRole("button", { name: "Enquadrar" }).click();
+await pagina.waitForTimeout(200);
+
+// O papel aparece no cabeçalho de cada agente, e dá para trocar ali.
+const seletor = pagina.locator(".no-agente .no-papel").first();
+conferir("o nó de agente traz o papel no cabeçalho", (await seletor.count()) === 1);
+const opcoes = await seletor.locator("option").allInnerTexts();
+conferir(
+  "a biblioteca embutida está no seletor",
+  ["Pesquisador", "Redator", "Revisor", "Analista", "Organizador"].every((p) =>
+    opcoes.includes(p),
+  ),
+  opcoes.join(", "),
+);
+conferir(
+  "e 'sem papel' continua sendo uma opção",
+  opcoes.includes("sem papel"),
+  "todo nó criado até o M4 está assim",
+);
+
+// Trocar o papel gruda no nó.
+await seletor.selectOption({ label: "Redator" });
+await pagina.waitForTimeout(150);
+conferir("dá para dar um papel ao nó", (await seletor.inputValue()) !== "");
+
+// Salvar o time e reabrir. `window.prompt` não existe no Playwright sem
+// tratar o diálogo — respondemos como o usuário responderia.
+pagina.once("dialog", (d) => d.accept("Time do contrato"));
+await pagina.getByRole("button", { name: "Salvar time" }).click();
+await pagina.waitForTimeout(250);
+
+const abrir = pagina.locator(".abrir-time");
+conferir("o time salvo aparece na barra", !(await abrir.isDisabled()));
+const rotulo = (await abrir.locator("option").nth(1).innerText()).trim();
+conferir("e diz quantos nós ele tem", /\(\d+\)/.test(rotulo), rotulo);
+
+const antesDeAbrir = await pagina.locator(".no").count();
+await abrir.selectOption({ index: 1 });
+await pagina.waitForFunction(
+  (antes) => document.querySelectorAll(".no").length > antes,
+  antesDeAbrir,
+  { timeout: 5000 },
+);
+const depoisDeAbrir = await pagina.locator(".no").count();
+conferir(
+  "reabrir o time monta os nós de novo",
+  depoisDeAbrir === antesDeAbrir * 2,
+  `${antesDeAbrir} → ${depoisDeAbrir}`,
+);
+
+// Nome desambiguado: dois "Redator" quebrariam o enviar_para, que resolve
+// vizinho pelo nome.
+const nomes = await pagina.locator(".no-nome").allInnerTexts();
+conferir(
+  "e desambigua os nomes repetidos",
+  nomes.some((n) => /\s2$/.test(n.trim())),
+  nomes.join(", "),
+);
+
+// A FORMA do time sobrevive: quem estava perto de quem continua perto. É o
+// que a partitura guarda além dos nomes — empilhar tudo em diagonal perderia
+// justamente isso.
+const caixas = await pagina.locator(".no").evaluateAll((els) =>
+  els.map((e) => ({
+    nome: e.querySelector(".no-nome")?.textContent ?? "",
+    x: Number.parseFloat(e.style.left),
+    y: Number.parseFloat(e.style.top),
+  })),
+);
+const achar = (n) => caixas.find((c) => c.nome === n);
+const dyOriginal = achar("Briefing").y - achar("Pesquisador").y;
+const dyCopia = achar("Briefing 2").y - achar("Pesquisador 2").y;
+conferir(
+  "e o time reaberto mantém a forma que tinha",
+  Math.abs(dyOriginal - dyCopia) < 1,
+  `${dyOriginal} vs ${dyCopia}`,
+);
+
+// Retrato do marco: o time montado, com papel em cada nó.
+await pagina.getByRole("button", { name: "Enquadrar" }).click();
+await pagina.waitForTimeout(250);
+await pagina.screenshot({ path: "testes-ui/time.png" });
+
 // 23. e nada explodiu durante tudo isso
 conferir("console limpo depois do turno", erros.length === 0, erros.slice(0, 2).join(" | "));
 
