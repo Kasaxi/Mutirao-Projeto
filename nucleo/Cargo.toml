@@ -3,6 +3,8 @@ name = "nucleo"
 version = "0.1.0"
 edition = "2021"
 description = "Núcleo do Mutirão: modelo, banco e regras. Sem dependência de UI."
+license-file = "../LICENSE"
+publish = false
 
 [dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }

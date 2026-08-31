@@ -299,15 +299,21 @@ sem travar o app.
 **Pronto quando:** dois ensaios do mesmo trabalho rodam ao mesmo tempo e eu publico um deles
 sem entender de Git.
 
-### M6 — Produto · 2–3 semanas
-- Instalador, auto-update, assinatura de código
-- Onboarding que detecta e instala as CLIs de agente e configura a chave
+### M6 — Ferramenta instalável · 2 semanas
+- Instalador e auto-update — reinstalar na mão a cada correção é imposto diário
+- Onboarding que detecta e instala as CLIs de agente e acha a chave no ambiente
 - Painel de custo por workspace e por nó, com teto configurável
 
-**Pronto quando:** alguém que não é programador instala, conecta e faz um trabalho útil sem me chamar.
+**Pronto quando:** instalo numa máquina limpa e trabalho, sem montar ambiente de desenvolvimento.
 
-**Total: 15 a 16 semanas** até algo instalável e vendável. M0–M3 (8 semanas) já é ferramenta de
-uso diário — ponto certo para mostrar a alguém de fora antes de investir o resto.
+Encolheu porque o uso é interno (`ESPECIFICACAO.md §11`): sem backend de cobrança, sem tela de
+login, sem conta de usuário. Assinatura de código vira opcional — sem ela o SmartScreen reclama
+uma vez por máquina, tolerável em três, inviável em trezentas. O painel de custo **não** é
+opcional: uma chave só, sem teto, é a configuração exata em que um ciclo malcomportado queima
+crédito de verdade.
+
+**Total: 14 a 15 semanas** até algo instalável. M0–M3 (8 semanas) já é ferramenta de uso diário —
+ponto certo para parar e usar de verdade antes de investir o resto.
 
 ---
 
@@ -331,6 +337,8 @@ uso diário — ponto certo para mostrar a alguém de fora antes de investir o r
 - **Portais de dispositivo** — emulador Android e simulador iOS são coisa de dev-tool.
 - **Copiloto local tipo Ombro** — bonito, não essencial.
 - **Marketplace de papéis** — só faz sentido com usuários. Antes: pasta de papéis em Markdown, exportável.
+- **Backend de cobrança e contas de usuário** — a chave é a do dono e o uso é interno. Existir
+  servidor no produto muda a arquitetura, não só um marco; é decisão para o dia da divulgação.
 
 ---
 

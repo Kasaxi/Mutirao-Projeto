@@ -3,6 +3,8 @@ name = "mutirao"
 version = "0.1.0"
 edition = "2021"
 description = "Mutirão — orquestrador de agentes em canvas infinito"
+license-file = "../LICENSE"
+publish = false
 default-run = "mutirao"
 
 [build-dependencies]

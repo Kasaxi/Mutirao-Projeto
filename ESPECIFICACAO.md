@@ -379,21 +379,84 @@ banco recebe a posição final no `pointerup`. O viewport usa debounce de 400 ms
 
 ---
 
-## 11. Decisões ainda abertas
+## 11. Decisões tomadas
 
-Estas mudam código e nenhuma delas é minha para tomar:
+As quatro que estavam abertas foram fechadas em 31/08/2026. O que cada uma
+manda fazer — e o que ela adia.
 
-1. **Nome do produto.** "Mutirão" é codinome. Trocar depois custa: identificador
-   do app (`app.mutirao.desktop`), pasta de dados, nome do binário e do MCP.
-   Decidir antes do M6 é barato; depois, não.
-2. **Licença.** Aberto atrai contribuição e cópia; fechado protege pouco num
-   nicho onde o concorrente principal é open source. A escolha muda desde o
-   README até a estratégia de distribuição.
-3. **Chave de API.** O usuário traz a dele (simples, sem risco de crédito) ou
-   você revende (melhor experiência, exige backend de cobrança e limite). Isso
-   define se existe servidor no produto ou não.
-4. **Modelo de cobrança.** Pagamento único como o Maestri, assinatura, ou grátis
-   com pago para times. Muda o M6 inteiro.
+### 1. Nome: fica "Mutirão" por enquanto
+
+Segue como codinome, sem decisão de marca. O custo de trocar é conhecido e
+permanece congelado: `app.mutirao.desktop` no `tauri.conf.json`, a pasta
+`%APPDATA%\app.mutirao.desktop`, o nome do binário e o do servidor MCP.
+
+**Consequência:** enquanto o uso for interno, trocar o nome é renomear
+constantes e mover uma pasta. Isso só encarece quando existir base instalada
+fora da casa — ou seja, no dia da divulgação, não antes. **Reabrir esta decisão
+antes de distribuir para fora**, que é o último momento barato.
+
+### 2. Licença: proprietária, todos os direitos reservados
+
+`LICENSE` na raiz, `"license": "UNLICENSED"` no `package.json`,
+`license-file` e `publish = false` nos dois `Cargo.toml` — o `publish = false`
+existe para que um `cargo publish` distraído não empurre o núcleo para o
+crates.io.
+
+**Consequência:** repositório privado. E vale dizer o que privado *não* é —
+não é cofre. Quem tem acesso de leitura leva tudo que estiver commitado, e
+histórico do Git não esquece. Daí a regra da chave abaixo.
+
+### 3. Chave de API: a do dono, pelo ambiente, nunca no repositório
+
+Não existe backend de cobrança, não existe revenda de crédito, não existe conta
+de usuário. Uma chave só, a de quem roda o app.
+
+O adaptador Claude (M1) roda num sidecar Node. A chave chega nele por variável
+de ambiente do processo — `ANTHROPIC_API_KEY` — e o Mutirão nunca a escreve em
+disco, nem no SQLite, nem em log. Para o M1 basta a variável já estar no
+ambiente de quem abre o app; o `.gitignore` cobre `.env*` para que um arquivo
+local de conveniência não vaze por descuido.
+
+> A ordem exata de resolução de credencial do Agent SDK (variável de ambiente
+> versus perfil em disco) deve ser conferida na documentação do SDK ao escrever
+> o adaptador, não deduzida daqui.
+
+**Consequência no produto:** o M6 perde o backend de cobrança inteiro, e o
+onboarding deixa de ter tela de login — vira "detectou a CLI, achou a chave,
+pronto". Quando houver usuário fora da casa, esta decisão volta à mesa: chave
+própria de cada um é o caminho barato; revenda exige servidor, e servidor muda
+a arquitetura, não só o M6.
+
+**O que não muda por ser interno:** o teto de custo por workspace e o orçamento
+por trace continuam sendo do M6. Uma chave só, sem limite, é exatamente a
+configuração em que um ciclo A→B→A malcomportado queima crédito real. O risco
+"custo de tokens descontrolado" do `ARQUITETURA.md §11` fica *mais* relevante,
+não menos.
+
+### 4. Cobrança: nenhuma, por enquanto — uso interno
+
+Sem preço, sem licenciamento, sem telemetria. A divulgação é uma decisão futura,
+tomada quando a ferramenta estiver boa, e é ela que reabre os itens 1, 3 e 4
+juntos.
+
+**Consequência:** o critério de pronto do M6 muda. Era *"alguém que não é
+programador instala, conecta e faz um trabalho útil sem me chamar"*. Enquanto
+for interno, é *"eu instalo numa máquina limpa e trabalho, sem montar ambiente
+de desenvolvimento"*. Instalador e auto-update continuam valendo — reinstalar na
+mão a cada correção é imposto diário. Assinatura de código passa a ser
+opcional: sem ela o SmartScreen reclama uma vez por máquina, o que é irritante
+para três máquinas e inviável para trezentas.
+
+---
+
+## 11b. O que continua aberto
+
+Nada que trave o M1. Ficam para o dia da divulgação:
+
+- **Marca definitiva** e o custo de renomear com base instalada.
+- **Se a chave passa a ser de cada usuário** ou revendida — e, se revendida, o
+  backend que isso implica.
+- **Modelo de cobrança**, que só existe depois que houver o que cobrar.
 
 ---
 

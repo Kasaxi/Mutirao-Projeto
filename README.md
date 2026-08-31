@@ -35,6 +35,18 @@ desenha o canvas e nunca fala com o backend fora de `src/lib/ipc.ts`.
 Essa separação existe por um motivo prático: `cargo test -p nucleo` roda em
 qualquer máquina, sem as dependências de sistema do Tauri.
 
+## Licença e uso
+
+Proprietário, todos os direitos reservados — veja `LICENSE`. Repositório privado,
+uso interno, sem distribuição. As quatro decisões que fixam isso (nome, licença,
+chave de API, cobrança) estão registradas em `ESPECIFICACAO.md §11`, com o que
+cada uma manda fazer e o que ela adia.
+
+**A chave da API nunca entra no repositório.** A partir do M1 o adaptador Claude
+a lê do ambiente (`ANTHROPIC_API_KEY`); o app não a grava em disco, nem no banco,
+nem em log. O `.gitignore` cobre `.env*`, mas isso é rede de proteção, não
+permissão: repositório privado não é cofre, e o histórico do Git não esquece.
+
 ## Ícone
 
 Já existe um provisório em `src-tauri/icons/` — três nós ligados, porque a
