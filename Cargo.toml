@@ -1,0 +1,12 @@
+[workspace]
+members = ["nucleo", "src-tauri"]
+resolver = "2"
+
+# `cargo test -p nucleo` roda em qualquer lugar, inclusive Linux sem GTK.
+# `cargo build -p mutirao` precisa das dependências de sistema do Tauri.
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

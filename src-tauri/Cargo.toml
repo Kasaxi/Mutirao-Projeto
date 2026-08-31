@@ -1,0 +1,19 @@
+[package]
+name = "mutirao"
+version = "0.1.0"
+edition = "2021"
+description = "Mutirão — orquestrador de agentes em canvas infinito"
+default-run = "mutirao"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+nucleo = { path = "../nucleo" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# usado pelo `tauri dev` para abrir devtools no build de release
+custom-protocol = ["tauri/custom-protocol"]

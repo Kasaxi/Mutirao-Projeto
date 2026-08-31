@@ -1,0 +1,414 @@
+/* Mutirão — M0
+   Paleta escura com um acento de latão. O canvas é o fundo do palco: quanto
+   mais quieto ele for, mais os nós aparecem. */
+
+:root {
+  --fundo: #101217;
+  --area: #0c0e12;
+  --grade: #1b1f27;
+  --superficie: #171a21;
+  --superficie-2: #1e222b;
+  --borda: #272c36;
+  --borda-forte: #38404d;
+  --texto: #e6e8e3;
+  --texto-fraco: #9aa0a6;
+  --texto-apagado: #6b7178;
+  --acento: #d6a75c;
+  --acento-fraco: #33291a;
+  --perigo: #d98a78;
+
+  --cabo-fala: #d6a75c;
+  --cabo-le: #7fa6c9;
+  --cabo-escreve: #8fbfa0;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#raiz {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--fundo);
+  color: var(--texto);
+  font-family: "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: grid;
+  grid-template-rows: 46px 1fr 26px;
+  height: 100%;
+}
+
+/* ----------------------------------------------------------------- barra */
+
+.barra {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 14px;
+  background: var(--superficie);
+  border-bottom: 1px solid var(--borda);
+  user-select: none;
+}
+
+.marca {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.versao {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--acento);
+  background: var(--acento-fraco);
+  padding: 2px 6px;
+  border-radius: 2px;
+}
+
+.ferramentas {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.divisor {
+  width: 1px;
+  height: 18px;
+  background: var(--borda-forte);
+  margin: 0 4px;
+}
+
+button {
+  font: inherit;
+  font-size: 13px;
+  color: var(--texto);
+  background: var(--superficie-2);
+  border: 1px solid var(--borda);
+  border-radius: 3px;
+  padding: 5px 11px;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--acento);
+  color: var(--acento);
+}
+
+button:disabled {
+  color: var(--texto-apagado);
+  cursor: default;
+}
+
+button:focus-visible,
+.porta:focus-visible {
+  outline: 2px solid var(--acento);
+  outline-offset: 2px;
+}
+
+.direita {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--texto-fraco);
+  font-size: 12px;
+}
+
+.selo {
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--acento);
+  border: 1px solid var(--acento-fraco);
+  background: var(--acento-fraco);
+  border-radius: 2px;
+  padding: 3px 7px;
+}
+
+.zoom {
+  font-variant-numeric: tabular-nums;
+  min-width: 44px;
+  text-align: right;
+}
+
+/* ------------------------------------------------------------------ área */
+
+.area {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--area);
+  background-image: radial-gradient(circle at 1px 1px, var(--grade) 1px, transparent 0);
+  cursor: default;
+  touch-action: none;
+}
+
+.area.arrastando {
+  cursor: grabbing;
+}
+
+.mundo {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.cabos {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.cabo path {
+  pointer-events: none;
+}
+
+.vazio {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  color: var(--texto-fraco);
+  pointer-events: none;
+}
+
+.vazio p {
+  margin: 2px 0;
+}
+
+/* -------------------------------------------------------------------- nó */
+
+.no {
+  position: absolute;
+  display: grid;
+  grid-template-rows: 32px 1fr;
+  background: var(--superficie);
+  border: 1px solid var(--borda);
+  border-radius: 5px;
+  box-shadow: 0 10px 30px -18px rgba(0, 0, 0, 0.9);
+  /* NÃO ponha overflow:hidden aqui. A porta de ligação vive meio para fora
+     do nó (right:-7px), e o clipping a torna inclicável: o clique atravessa
+     para o fundo e vira pan. Quem recorta é o corpo. */
+}
+
+.no.selecionado {
+  border-color: var(--acento);
+  box-shadow: 0 0 0 1px var(--acento), 0 12px 34px -18px rgba(0, 0, 0, 0.9);
+}
+
+.no-cabecalho {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  background: var(--superficie-2);
+  border-bottom: 1px solid var(--borda);
+  border-radius: 4px 4px 0 0; /* acompanha o canto do nó, já que ele não recorta */
+  cursor: grab;
+  user-select: none;
+}
+
+.no-cabecalho:active {
+  cursor: grabbing;
+}
+
+.no-tipo {
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--texto-apagado);
+  flex-shrink: 0;
+}
+
+.no-nome {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.no-nome-editando {
+  font: inherit;
+  font-weight: 500;
+  color: var(--texto);
+  background: var(--fundo);
+  border: 1px solid var(--acento);
+  border-radius: 2px;
+  padding: 1px 5px;
+  width: 100%;
+  min-width: 0;
+}
+
+.no-corpo {
+  overflow: hidden;
+  padding: 10px;
+  color: var(--texto-fraco);
+  font-size: 12.5px;
+}
+
+/* cores por tipo, sutis: o cabeçalho ganha um fio da cor do cabo */
+.no-agente .no-cabecalho {
+  box-shadow: inset 3px 0 0 var(--cabo-fala);
+}
+.no-nota .no-cabecalho {
+  box-shadow: inset 3px 0 0 var(--cabo-escreve);
+}
+.no-arquivos .no-cabecalho {
+  box-shadow: inset 3px 0 0 var(--cabo-le);
+}
+.no-portal .no-cabecalho {
+  box-shadow: inset 3px 0 0 #a98fc9;
+}
+
+.porta {
+  position: absolute;
+  right: -7px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--superficie-2);
+  border: 1px solid var(--borda-forte);
+  cursor: crosshair;
+}
+
+.porta:hover {
+  background: var(--acento);
+  border-color: var(--acento);
+}
+
+.alca-tamanho {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  background: linear-gradient(
+    135deg,
+    transparent 50%,
+    var(--borda-forte) 50%,
+    var(--borda-forte) 100%
+  );
+}
+
+/* --------------------------------------------------------------- maquete */
+
+.maquete {
+  height: 100%;
+  position: relative;
+}
+
+.marco {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--texto-apagado);
+  border: 1px dashed var(--borda-forte);
+  border-radius: 2px;
+  padding: 2px 6px;
+}
+
+.conversa {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bolha {
+  border-radius: 8px;
+  padding: 7px 10px;
+  max-width: 78%;
+}
+
+.bolha.agente {
+  background: var(--superficie-2);
+  border: 1px solid var(--borda);
+}
+
+.bolha.usuario {
+  align-self: flex-end;
+  background: var(--acento-fraco);
+  color: var(--acento);
+}
+
+.maquete.nota p {
+  margin: 0 0 6px;
+}
+
+.maquete .fraco,
+.fraco {
+  color: var(--texto-apagado);
+}
+
+.arvore p {
+  margin: 0 0 4px;
+}
+
+.arvore .recuo {
+  padding-left: 16px;
+}
+
+.barra-url {
+  background: var(--fundo);
+  border: 1px solid var(--borda);
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 11.5px;
+  color: var(--texto-apagado);
+}
+
+.maquete.forma {
+  border: 1px dashed var(--borda-forte);
+  border-radius: 3px;
+  height: 100%;
+}
+
+/* ---------------------------------------------------------------- rodapé */
+
+.rodape {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 14px;
+  background: var(--superficie);
+  border-top: 1px solid var(--borda);
+  font-size: 11.5px;
+  color: var(--texto-apagado);
+  user-select: none;
+}
+
+.aviso {
+  margin-left: auto;
+  color: var(--perigo);
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
+}
