@@ -2,6 +2,7 @@ import type {
   Adaptador,
   Autonomia,
   Cabo,
+  Ensaio,
   ChamadaFerramenta,
   CustoDoNo,
   Decisao,
@@ -13,8 +14,11 @@ import type {
   No,
   Nota,
   PapelMensagem,
+  LadoDoConflito,
   Papel,
   Partitura,
+  PreviaPublicacao,
+  ServidorMcp,
   PedidoAprovacao,
   RegraAprovacao,
   Sessao,
@@ -158,6 +162,31 @@ export const ipc = {
     chamar<No[]>("abrir_time", { workspaceId, partituraId }),
 
   removerTime: (id: string) => chamar<void>("remover_time", { id }),
+
+  // ---------------------------------------------------------- rascunhos
+
+  listarRascunhos: (workspaceId: string) =>
+    chamar<Ensaio[]>("listar_rascunhos", { workspaceId }),
+
+  criarRascunho: (workspaceId: string, nome: string) =>
+    chamar<Ensaio>("criar_rascunho", { workspaceId, nome }),
+
+  /** `ensaioId` nulo volta para a pasta de verdade. */
+  trocarRascunho: (workspaceId: string, ensaioId: string | null) =>
+    chamar<void>("trocar_rascunho", { workspaceId, ensaioId }),
+
+  descartarRascunho: (ensaioId: string) =>
+    chamar<void>("descartar_rascunho", { ensaioId }),
+
+  /** Não escreve nada: é o que a tela mostra antes do clique. */
+  preverPublicacao: (ensaioId: string) =>
+    chamar<PreviaPublicacao>("prever_publicacao", { ensaioId }),
+
+  publicarRascunho: (ensaioId: string, escolhas: Array<[string, LadoDoConflito]>) =>
+    chamar<PreviaPublicacao>("publicar_rascunho", { ensaioId, escolhas }),
+
+  definirMcpDoPapel: (id: string, servidores: ServidorMcp[]) =>
+    chamar<Papel>("definir_mcp_do_papel", { id, servidores }),
 };
 
 /**
@@ -196,6 +225,9 @@ const mem = {
   regras: [] as RegraAprovacao[],
   papeis: [] as Papel[],
   times: [] as Partitura[],
+  rascunhos: [] as Ensaio[],
+  /** Arquivos por rascunho, no falso: id do ensaio -> caminho -> conteúdo. */
+  arquivosDoRascunho: new Map<string, Map<string, string>>(),
   /** Sistema de arquivos de mentira: caminho relativo -> conteúdo. */
   arquivos: new Map<string, string>(),
 };
@@ -630,6 +662,10 @@ function semear() {
     pasta: "C:\\Users\\voce\\Mutirao\\demo",
     criado_em: agora(),
     ensaio_ativo: null,
+    // O modo navegador não tem Git por baixo: os rascunhos existem em memória,
+    // como o resto do falso. Um caminho de mentira aqui é mais honesto que
+    // `null`, que diria "esta máquina não tem histórico" — e diria errado.
+    repo: "(memória)",
     viewport: { x: 80, y: 60, zoom: 0.9 },
   };
   mem.workspaces.push(ws);
@@ -667,6 +703,31 @@ function semear() {
     cabo(ws.id, pesquisa.id, briefing.id, "escreve_nota"),
     cabo(ws.id, redator.id, briefing.id, "le_nota"),
   );
+}
+
+/**
+ * O que muda ao publicar, no falso. Compara a cópia do rascunho com a pasta.
+ *
+ * Conflito aqui é "os dois lados mexeram no mesmo arquivo" — o Rust usa o
+ * `merge-tree` do Git, que sabe juntar texto quando dá; o falso não sabe, e
+ * chama de conflito qualquer coincidência. É mais pessimista que o de verdade,
+ * o que é o lado certo de errar numa maquete.
+ */
+function previaFalsa(ensaioId: string): PreviaPublicacao {
+  const doRascunho = mem.arquivosDoRascunho.get(ensaioId) ?? new Map<string, string>();
+  const alteracoes: PreviaPublicacao["alteracoes"] = [];
+  const conflitos: string[] = [];
+
+  for (const [caminho, conteudo] of doRascunho) {
+    const naPasta = mem.arquivos.get(caminho);
+    if (naPasta === conteudo) continue;
+    alteracoes.push({ caminho, como: naPasta === undefined ? "criado" : "alterado" });
+    if (naPasta !== undefined) conflitos.push(caminho);
+  }
+  for (const caminho of mem.arquivos.keys()) {
+    if (!doRascunho.has(caminho)) alteracoes.push({ caminho, como: "apagado" });
+  }
+  return { ensaio_id: ensaioId, alteracoes, conflitos };
 }
 
 function cabo(ws: string, de: string, para: string, tipo: TipoCabo): Cabo {
@@ -743,6 +804,83 @@ async function falso<T>(comando: string, a: Record<string, any>): Promise<T> {
 
     case "listar_times":
       return qualquer(mem.times.filter((t) => t.workspace_id === a.workspaceId));
+
+    // ---------------------------------------------------------- rascunhos
+    //
+    // O modo navegador não tem Git por baixo. O falso guarda os rascunhos em
+    // memória com as MESMAS regras visíveis: a pasta de verdade não muda até
+    // publicar, conflito precisa de escolha, e descartar joga fora. O que ele
+    // não faz é mesclar de verdade — isso é do Rust, e é lá que tem teste.
+
+    case "listar_rascunhos":
+      return qualquer(mem.rascunhos.filter((e) => e.workspace_id === a.workspaceId));
+
+    case "criar_rascunho": {
+      const e: Ensaio = {
+        id: id(),
+        workspace_id: a.workspaceId,
+        nome: (a.nome as string).trim(),
+        branch: "(memória)",
+        caminho_worktree: "(memória)",
+        base_commit: null,
+        estado: "aberto",
+        criado_em: agora(),
+        alterado_em: agora(),
+      };
+      if (!e.nome) throw { codigo: "invalido", mensagem: "o rascunho precisa de um nome" };
+      mem.rascunhos.push(e);
+      // Nasce com uma cópia do que está na pasta agora.
+      mem.arquivosDoRascunho.set(e.id, new Map(mem.arquivos));
+      return qualquer(e);
+    }
+
+    case "trocar_rascunho": {
+      const ws = mem.workspaces.find((w) => w.id === a.workspaceId);
+      if (!ws) throw { codigo: "nao_encontrado", mensagem: "workspace não encontrado" };
+      ws.ensaio_ativo = a.ensaioId ?? null;
+      return qualquer(undefined);
+    }
+
+    case "descartar_rascunho": {
+      const e = mem.rascunhos.find((x) => x.id === a.ensaioId);
+      if (!e) throw { codigo: "nao_encontrado", mensagem: "rascunho não encontrado" };
+      e.estado = "descartado";
+      e.alterado_em = agora();
+      mem.arquivosDoRascunho.delete(e.id);
+      const ws = mem.workspaces.find((w) => w.id === e.workspace_id);
+      if (ws?.ensaio_ativo === e.id) ws.ensaio_ativo = null;
+      return qualquer(undefined);
+    }
+
+    case "prever_publicacao":
+      return qualquer(previaFalsa(a.ensaioId as string));
+
+    case "publicar_rascunho": {
+      const e = mem.rascunhos.find((x) => x.id === a.ensaioId);
+      if (!e) throw { codigo: "nao_encontrado", mensagem: "rascunho não encontrado" };
+      const previa = previaFalsa(e.id);
+      const escolhas = new Map((a.escolhas ?? []) as Array<[string, string]>);
+      const semEscolha = previa.conflitos.find((c) => !escolhas.has(c));
+      if (semEscolha) {
+        throw {
+          codigo: "invalido",
+          mensagem: `"${semEscolha}" mudou dos dois lados e ninguém escolheu qual fica. Nada foi publicado.`,
+        };
+      }
+      const doRascunho = mem.arquivosDoRascunho.get(e.id) ?? new Map();
+      for (const m of previa.alteracoes) {
+        if (escolhas.get(m.caminho) === "original") continue;
+        const conteudo = doRascunho.get(m.caminho);
+        if (conteudo === undefined) mem.arquivos.delete(m.caminho);
+        else mem.arquivos.set(m.caminho, conteudo);
+      }
+      e.estado = "publicado";
+      e.alterado_em = agora();
+      const ws = mem.workspaces.find((w) => w.id === e.workspace_id);
+      if (ws?.ensaio_ativo === e.id) ws.ensaio_ativo = null;
+      mem.arquivosDoRascunho.delete(e.id);
+      return qualquer({ ...previa, conflitos: [] });
+    }
 
     case "remover_time": {
       mem.times = mem.times.filter((t) => t.id !== a.id);

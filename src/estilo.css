@@ -60,6 +60,7 @@ body {
   background: var(--superficie);
   border-bottom: 1px solid var(--borda);
   user-select: none;
+  overflow: hidden;
 }
 
 .marca {
@@ -83,6 +84,31 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* A barra ganhou controles a cada marco. `flex: 1 1 0` com `min-width: 0` é
+     o que deixa ESTE grupo encolher e rolar, em vez de empurrar o custo e os
+     selos para fora da janela — que era o que acontecia desde que os
+     rascunhos chegaram. Sem o `min-width: 0`, um item flex nunca encolhe
+     abaixo do conteúdo, e o `overflow` não tem efeito nenhum. */
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ferramentas::-webkit-scrollbar {
+  display: none;
+}
+
+/* Botão de barra nunca quebra linha: a barra tem 46px de altura fixa, e um
+   rótulo em duas linhas estoura para fora dela. */
+.barra button,
+.barra select {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.direita {
+  flex-shrink: 0;
 }
 
 .divisor {
@@ -127,6 +153,9 @@ button:focus-visible,
   gap: 12px;
   color: var(--texto-fraco);
   font-size: 12px;
+  /* Nunca encolhe: o custo e o aviso de qual adaptador está respondendo são
+     as duas coisas da barra que não podem sumir. */
+  flex-shrink: 0;
 }
 
 .selo {
@@ -1014,4 +1043,129 @@ button.arvore-item:hover {
   * {
     transition: none !important;
   }
+}
+
+/* ---------------------------------------------------------------- rascunhos */
+
+/* A barra de rascunhos. Discreta quando você está na pasta de verdade,
+   marcada quando está num rascunho — porque estar num rascunho muda onde
+   TODOS os agentes gravam, e esquecer disso é o erro caro deste marco. */
+.rascunho-atual {
+  padding: 3px 6px;
+  background: var(--superficie);
+  border: 1px solid var(--borda);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--texto);
+  cursor: pointer;
+}
+
+.rascunho-atual.ativo {
+  border-color: var(--acento);
+  color: var(--acento);
+}
+
+.rascunhos-sem {
+  font-size: 11.5px;
+  color: var(--texto-apagado);
+}
+
+.publicar {
+  border-color: var(--acento) !important;
+  color: var(--acento) !important;
+}
+
+/* --------------------------------------------------------- tela de publicar */
+
+.publicar-fundo {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 0.55);
+}
+
+.publicar-caixa {
+  width: min(620px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  background: var(--superficie);
+  border: 1px solid var(--borda-forte);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgb(0 0 0 / 0.5);
+}
+
+.publicar-titulo {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.publicar-resumo {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--texto-fraco);
+}
+
+.publicar-lista {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+}
+
+.publicar-lista li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 2px;
+  border-bottom: 1px solid var(--borda);
+}
+
+.publicar-lista li.conflito {
+  /* O conflito precisa saltar: é o único item da lista que exige decisão. */
+  color: var(--perigo);
+}
+
+.publicar-caminho {
+  flex: 1;
+  overflow-wrap: anywhere;
+  color: var(--texto);
+}
+
+.publicar-como-texto {
+  font-size: 11px;
+  color: var(--texto-apagado);
+}
+
+.publicar-escolha {
+  display: flex;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--texto-fraco);
+}
+
+.publicar-escolha label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+}
+
+.publicar-botoes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.publicar-falta {
+  font-size: 11.5px;
+  color: var(--perigo);
 }

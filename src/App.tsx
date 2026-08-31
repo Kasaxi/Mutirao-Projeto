@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Cabos, type Recado } from "./canvas/Cabos";
 import { NoView } from "./canvas/NoView";
+import { Rascunhos } from "./canvas/Rascunhos";
 import {
   enquadrar,
   limitar,
@@ -540,7 +541,7 @@ export default function App() {
       <header className="barra">
         <div className="marca">
           Mutirão
-          <span className="versao">M4</span>
+          <span className="versao">M5</span>
         </div>
 
         <div className="ferramentas">
@@ -555,6 +556,18 @@ export default function App() {
           <button onClick={remover} disabled={!selecionado} title="Delete">
             Remover
           </button>
+          <span className="divisor" />
+          {/* Rascunhos: duas versões do mesmo trabalho ao mesmo tempo.
+              Nenhuma palavra de Git chega aqui. */}
+          {estado && (
+            <Rascunhos
+              workspaceId={estado.workspace.id}
+              ativo={estado.workspace.ensaio_ativo}
+              temHistorico={estado.workspace.repo !== null}
+              aoMudar={() => void recarregarCanvas()}
+              aoAvisar={setAviso}
+            />
+          )}
           <span className="divisor" />
           {/* O time salvo. Guarda quem trabalha e como está ligado — a
               conversa fica onde está, porque partitura não é backup. */}

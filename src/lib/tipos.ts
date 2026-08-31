@@ -24,7 +24,10 @@ export interface Workspace {
   nome: string;
   pasta: string;
   criado_em: number;
+  /** O rascunho em foco. `null` = trabalhando na pasta de verdade. */
   ensaio_ativo: string | null;
+  /** Onde mora o histórico. `null` = sem rascunhos nesta máquina. */
+  repo: string | null;
   viewport: Viewport;
 }
 
@@ -283,6 +286,8 @@ export interface Papel {
   /** Veio com o app. Dá para editar, não dá para apagar. */
   embutido: boolean;
   criado_em: number;
+  /** Servidores MCP externos, sem os segredos deles. */
+  mcp?: ServidorMcp[];
 }
 
 export const ROTULO_AUTONOMIA: Record<Autonomia, string> = {
@@ -326,6 +331,65 @@ export interface Partitura {
  * O canvas mudou por fora da interface — hoje só quando um agente recruta
  * outro. O front relê o workspace ao ver isto.
  */
+// =========================================================== M5: rascunhos ===
+
+/**
+ * Um rascunho: uma cópia isolada da pasta em que o time trabalha sem mexer no
+ * que está valendo.
+ *
+ * `branch` e `caminho_worktree` chegam do núcleo mas **não aparecem na tela**.
+ * O usuário vê "Rascunho 2" e "Publicar"; a `Decisão 3` do `ARQUITETURA.md`
+ * vale até nas mensagens de erro.
+ */
+export interface Ensaio {
+  id: string;
+  workspace_id: string;
+  nome: string;
+  branch: string;
+  caminho_worktree: string;
+  base_commit: string | null;
+  estado: EstadoEnsaio;
+  criado_em: number;
+  alterado_em: number;
+}
+
+export type EstadoEnsaio = "aberto" | "publicado" | "descartado";
+
+export const ROTULO_ENSAIO: Record<EstadoEnsaio, string> = {
+  aberto: "em uso",
+  publicado: "publicado",
+  descartado: "descartado",
+};
+
+export type TipoMudanca = "criado" | "alterado" | "apagado" | "renomeado";
+
+export interface MudancaArquivo {
+  caminho: string;
+  como: TipoMudanca;
+}
+
+/** O que a tela de publicar mostra ANTES do clique. */
+export interface PreviaPublicacao {
+  ensaio_id: string;
+  alteracoes: MudancaArquivo[];
+  /** Cada um precisa de uma escolha: publicar pela metade é pior que não publicar. */
+  conflitos: string[];
+}
+
+export type LadoDoConflito = "original" | "rascunho";
+
+/** Um servidor MCP de fora, ligado a um papel. Ver `ARQUITETURA.md §7`. */
+export interface ServidorMcp {
+  nome: string;
+  url: string;
+  /**
+   * Os cabeçalhos **não voltam** do backend: a chave do CRM de alguém não
+   * atravessa a fronteira. Vazio ao ler quer dizer "há segredo guardado lá",
+   * não "não há segredo".
+   */
+  cabecalhos?: Array<[string, string]>;
+}
+
 export interface EventoCanvasMudou {
   tipo: "canvas_mudou";
   workspace_id: string;

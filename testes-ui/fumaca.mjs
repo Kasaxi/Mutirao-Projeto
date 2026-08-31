@@ -503,6 +503,88 @@ await pagina.getByRole("button", { name: "Enquadrar" }).click();
 await pagina.waitForTimeout(250);
 await pagina.screenshot({ path: "testes-ui/time.png" });
 
+// ============================================================== M5 =========
+// "dois ensaios do mesmo trabalho rodam ao mesmo tempo e eu publico um deles
+// sem entender de Git". A tela é a prova: se a palavra "branch" ou "commit"
+// aparecer, o marco falhou mesmo com o código certo.
+
+console.log("\nM5 — rascunhos");
+
+await pagina.reload();
+await pagina.waitForSelector(".no");
+
+const seletorRascunho = pagina.locator(".rascunho-atual");
+conferir("a barra mostra onde o trabalho acontece", (await seletorRascunho.count()) === 1);
+conferir(
+  "e começa na pasta de verdade",
+  (await seletorRascunho.inputValue()) === "",
+  await seletorRascunho.locator("option:checked").innerText(),
+);
+
+// Criar um rascunho e entrar nele.
+pagina.once("dialog", (d) => d.accept("Com a cláusula nova"));
+await pagina.getByRole("button", { name: "Novo", exact: true }).click();
+await pagina.waitForFunction(
+  () => document.querySelector(".rascunho-atual")?.classList.contains("ativo"),
+  { timeout: 5000 },
+);
+conferir("criar um rascunho já entra nele", true);
+conferir(
+  "e o aviso diz que a pasta de verdade não muda",
+  (await pagina.locator(".aviso").innerText()).includes("não muda até publicar"),
+  await pagina.locator(".aviso").innerText(),
+);
+
+// O agente trabalha no rascunho: escreve na nota.
+const notaNoRascunho = pagina.locator(".no-nota").first();
+await notaNoRascunho.locator(".nota-campo").fill("# Briefing\n\nversão do rascunho\n");
+await pagina.waitForTimeout(700); // o debounce da nota
+
+// A tela de publicar mostra o que muda ANTES.
+await pagina.getByRole("button", { name: "Publicar…" }).click();
+await pagina.waitForSelector(".publicar-caixa", { timeout: 5000 });
+const caixa = pagina.locator(".publicar-caixa");
+conferir(
+  "a tela de publicar diz quantos arquivos mudam",
+  /arquivo\(s\) vão para a pasta de verdade/.test(await caixa.innerText()),
+  (await caixa.locator(".publicar-resumo").innerText()).slice(0, 60),
+);
+
+// A regra que define o marco: nenhuma palavra de Git na tela.
+const textoDaTela = (await caixa.innerText()).toLowerCase();
+const palavrasDeGit = ["git", "branch", "commit", "merge", "worktree", "rebase", "stash"];
+const vazou = palavrasDeGit.filter((p) => textoDaTela.includes(p));
+conferir("e não usa uma palavra de Git", vazou.length === 0, vazou.join(", "));
+
+// Retrato do marco: a tela de publicar, em linguagem de gente.
+await pagina.screenshot({ path: "testes-ui/publicar.png" });
+
+// Conflito: o arquivo mudou dos dois lados, então precisa de escolha.
+const temConflito = (await caixa.locator("li.conflito").count()) > 0;
+if (temConflito) {
+  conferir(
+    "conflito bloqueia o botão até alguém escolher um lado",
+    await caixa.getByRole("button", { name: "Publicar" }).isDisabled(),
+  );
+  await caixa.locator("li.conflito input[type=radio]").first().check();
+}
+conferir(
+  "escolhido um lado, dá para publicar",
+  !(await caixa.getByRole("button", { name: "Publicar" }).isDisabled()),
+);
+
+await caixa.getByRole("button", { name: "Publicar" }).click();
+await pagina.waitForSelector(".publicar-caixa", { state: "detached", timeout: 5000 });
+conferir(
+  "publicar leva o trabalho para a pasta de verdade",
+  (await pagina.locator(".aviso").innerText()).includes("publicado"),
+  await pagina.locator(".aviso").innerText(),
+);
+conferir(
+  "e o foco volta para a pasta de verdade",
+  (await pagina.locator(".rascunho-atual").inputValue()) === "",
+);
+
 // 23. e nada explodiu durante tudo isso
 conferir("console limpo depois do turno", erros.length === 0, erros.slice(0, 2).join(" | "));
 
