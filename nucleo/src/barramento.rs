@@ -67,9 +67,28 @@ pub fn pede_licenca(ferramenta: &str) -> bool {
             .any(|f| crate::ferramentas::nome_completo(f) == ferramenta)
 }
 
+/// Veio de um servidor MCP de fora?
+///
+/// Estas pedem card **sempre**, e não por categoria de ação: nós não sabemos o
+/// que a ferramenta de outra pessoa faz, e o `ARQUITETURA.md §8` diz que ação
+/// externa sempre pede aprovação, em qualquer nível de autonomia.
+///
+/// Sem esta checagem existiria um buraco calado: o hook dispararia (o matcher
+/// pega `mcp__crm__.*`), chegaria aqui, e o `pede_licenca` diria "não precisa"
+/// porque `mcp__crm__buscar` não está em lista nenhuma — o agente sairia
+/// falando com o mundo sem ninguém ver.
+pub fn e_de_fora(ferramenta: &str, externos: &[ServidorMcp]) -> bool {
+    externos.iter().any(|s| ferramenta.starts_with(&format!("mcp__{}__", s.nome)))
+}
+
 /// Esta aceita "não perguntar de novo"? Escrever nota e escrever arquivo sim,
 /// pela mesma razão que `Write`: é gravação na pasta do workspace, e o usuário
 /// que já disse sim para a pasta não quer dizer de novo a cada parágrafo.
+///
+/// Ferramenta de servidor externo **nunca** entra aqui, e não por esquecimento:
+/// a lista de regras é por (workspace, ferramenta), e liberar `mcp__crm__*` de
+/// uma vez seria dar acesso permanente ao CRM de alguém num clique que ninguém
+/// lembra uma semana depois. Mesmo argumento do `Bash`.
 pub fn aceita_regra(ferramenta: &str) -> bool {
     FERRAMENTAS_QUE_ACEITAM_REGRA.contains(&ferramenta)
         || crate::ferramentas::FERRAMENTAS_QUE_GRAVAM
@@ -77,9 +96,21 @@ pub fn aceita_regra(ferramenta: &str) -> bool {
             .any(|f| crate::ferramentas::nome_completo(f) == ferramenta)
 }
 
-/// O matcher do hook `PreToolUse`: tudo que pede licença, nativo e MCP, no
-/// formato de alternativa que o Claude Code espera.
-pub fn matcher_do_hook() -> String {
+/// O matcher do hook `PreToolUse`: tudo que pede licença, no formato de
+/// alternativa que o Claude Code espera.
+///
+/// Três grupos, e o terceiro é o que muda no M5:
+///
+/// 1. as nativas que gravam ou rodam comando;
+/// 2. as nossas do §6 que gravam, pelo nome completo;
+/// 3. **tudo** de cada servidor MCP externo, por curinga.
+///
+/// O terceiro é curinga porque não sabemos que ferramentas um servidor de fora
+/// oferece — e porque não precisamos saber: o `ARQUITETURA.md §8` diz que ação
+/// externa sempre pede aprovação, em qualquer nível de autonomia. Medido na
+/// CLI 2.1.251: `mcp__mutirao__.*` faz o hook disparar para
+/// `mcp__mutirao__listar_nos`, e o "não" impede a chamada.
+pub fn matcher_do_hook(externos: &[ServidorMcp]) -> String {
     let mut nomes: Vec<String> =
         FERRAMENTAS_QUE_PEDEM_LICENCA.iter().map(|s| s.to_string()).collect();
     nomes.extend(
@@ -87,6 +118,7 @@ pub fn matcher_do_hook() -> String {
             .iter()
             .map(|f| crate::ferramentas::nome_completo(f)),
     );
+    nomes.extend(externos.iter().map(|s| format!("mcp__{}__.*", s.nome)));
     nomes.join("|")
 }
 
@@ -205,17 +237,23 @@ pub fn avaliar(
     pedido: PedidoDoHook,
     prazo: Duration,
 ) -> Resultado<Veredito> {
-    let (sessao, node_id, workspace_id) = {
+    let (sessao, node_id, workspace_id, externos) = {
         let b = trava(banco)?;
         let sessao = b.sessao_por_token(token)?;
         let no = b.obter_no(&sessao.node_id)?;
-        (sessao.clone(), sessao.node_id.clone(), no.workspace_id)
+        let externos = no
+            .role_id
+            .as_deref()
+            .and_then(|id| b.obter_papel(id).ok())
+            .map(|p| p.mcp)
+            .unwrap_or_default();
+        (sessao.clone(), sessao.node_id.clone(), no.workspace_id, externos)
     };
 
     // Ler não pede licença. Sem isto o agente pararia a cada arquivo aberto e
     // o card viraria ruído — e um card que vira ruído é um card que o usuário
     // aprova sem ler.
-    if !pede_licenca(&pedido.ferramenta) {
+    if !pede_licenca(&pedido.ferramenta) && !e_de_fora(&pedido.ferramenta, &externos) {
         return Ok(Veredito::permitir("Leitura não precisa de aprovação."));
     }
 

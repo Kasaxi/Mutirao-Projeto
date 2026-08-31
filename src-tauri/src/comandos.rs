@@ -35,7 +35,23 @@ pub fn criar_workspace(
         std::fs::create_dir_all(&pasta).map_err(nucleo::Erro::from)?;
         pasta
     };
-    Ok(estado.banco()?.criar_workspace(&nome, &pasta)?)
+    let banco = estado.banco()?;
+    let ws = banco.criar_workspace(&nome, &pasta)?;
+
+    // O histórico oculto fica na pasta de dados do app, **fora** da pasta do
+    // usuário — ver `nucleo/src/git.rs`. Onde ficam os dados de um app é
+    // pergunta do sistema operacional, então quem responde é a casca.
+    if let Ok(dados) = tauri::Manager::path(&app).app_data_dir() {
+        let repo = dados.join("historicos").join(&ws.id);
+        banco.definir_repo(&ws.id, &repo.to_string_lossy())?;
+    }
+    // Falhar aqui não derruba a criação: sem histórico o workspace continua
+    // servindo para tudo menos rascunho, e é isso que o app diz na tela.
+    if let Err(e) = nucleo::ensaios::preparar(&banco, &ws.id) {
+        eprintln!("[mutirao] sem histórico para {}: {e}", ws.nome);
+    }
+    Ok(banco.obter_workspace(&ws.id)?)
+    // NOTA: o `abrir_workspace` faz o mesmo para workspace de antes do M5.
 }
 
 /// O nome do workspace virando nome de pasta. Mesmo espírito de
@@ -64,10 +80,25 @@ pub fn listar_workspaces(estado: State<EstadoApp>) -> ResultadoIpc<Vec<Workspace
 
 #[tauri::command]
 pub fn abrir_workspace(
+    app: tauri::AppHandle,
     estado: State<EstadoApp>,
     workspace_id: String,
 ) -> ResultadoIpc<EstadoCanvas> {
-    Ok(estado.banco()?.estado_canvas(&workspace_id)?)
+    let banco = estado.banco()?;
+    // Workspace do M0 ao M4 não tem repositório: ganha um aqui, na primeira
+    // abertura depois da atualização. Sem isto, quem já usava o app nunca
+    // teria rascunho e não saberia por quê.
+    if banco.obter_workspace(&workspace_id)?.repo.is_none() {
+        if let Ok(dados) = tauri::Manager::path(&app).app_data_dir() {
+            let repo = dados.join("historicos").join(&workspace_id);
+            banco.definir_repo(&workspace_id, &repo.to_string_lossy())?;
+        }
+    }
+    // Idempotente: um repositório que já existe não é tocado.
+    if let Err(e) = nucleo::ensaios::preparar(&banco, &workspace_id) {
+        eprintln!("[mutirao] sem histórico para {workspace_id}: {e}");
+    }
+    Ok(banco.estado_canvas(&workspace_id)?)
 }
 
 #[tauri::command]
@@ -367,9 +398,17 @@ pub struct CustoWorkspace {
 // Papéis e times. A casca continua casca: cada comando é uma linha de despacho
 // para o núcleo, e a regra mora lá.
 
+/// Os papéis, **sem os segredos**. A chave do servidor externo de alguém não
+/// atravessa a fronteira: o que chega ao front chega a tudo que roda no front.
+/// Mesma regra do token da sessão — ver `ESPECIFICACAO.md §4`.
 #[tauri::command]
 pub fn listar_papeis(estado: State<EstadoApp>) -> ResultadoIpc<Vec<Papel>> {
-    Ok(estado.banco()?.listar_papeis()?)
+    Ok(estado
+        .banco()?
+        .listar_papeis()?
+        .into_iter()
+        .map(Papel::sem_segredos)
+        .collect())
 }
 
 #[tauri::command]
@@ -474,4 +513,84 @@ pub fn abrir_time(
 #[tauri::command]
 pub fn remover_time(estado: State<EstadoApp>, id: String) -> ResultadoIpc<()> {
     Ok(estado.banco()?.remover_partitura(&id)?)
+}
+
+// ================================================================== M5 =====
+// Rascunhos. Nenhuma palavra de Git chega ao front — nem nos nomes dos
+// comandos, nem nos campos que eles devolvem.
+
+#[tauri::command]
+pub fn listar_rascunhos(
+    estado: State<EstadoApp>,
+    workspace_id: String,
+) -> ResultadoIpc<Vec<Ensaio>> {
+    Ok(estado.banco()?.listar_ensaios(&workspace_id)?)
+}
+
+#[tauri::command]
+pub fn criar_rascunho(
+    estado: State<EstadoApp>,
+    workspace_id: String,
+    nome: String,
+) -> ResultadoIpc<Ensaio> {
+    let banco = estado.banco()?;
+    Ok(nucleo::ensaios::criar(&banco, &workspace_id, &nome)?)
+}
+
+/// Troca o rascunho em foco. `ensaioId` nulo volta para a pasta de verdade.
+///
+/// Passa pelo `ensaios::trocar`, e não pelo banco direto, porque trocar
+/// **precisa** derrubar os adaptadores vivos antes — senão um agente já aberto
+/// continua gravando na pasta anterior.
+#[tauri::command]
+pub fn trocar_rascunho(
+    estado: State<EstadoApp>,
+    workspace_id: String,
+    ensaio_id: Option<String>,
+) -> ResultadoIpc<()> {
+    let banco = estado.banco()?;
+    Ok(nucleo::ensaios::trocar(
+        &banco,
+        estado.orquestrador(),
+        &workspace_id,
+        ensaio_id.as_deref(),
+    )?)
+}
+
+#[tauri::command]
+pub fn descartar_rascunho(estado: State<EstadoApp>, ensaio_id: String) -> ResultadoIpc<()> {
+    let banco = estado.banco()?;
+    Ok(nucleo::ensaios::descartar(&banco, estado.orquestrador(), &ensaio_id)?)
+}
+
+/// O que muda ao publicar. Não escreve nada — é o que a tela mostra antes do
+/// clique.
+#[tauri::command]
+pub fn prever_publicacao(
+    estado: State<EstadoApp>,
+    ensaio_id: String,
+) -> ResultadoIpc<PreviaPublicacao> {
+    let banco = estado.banco()?;
+    Ok(nucleo::ensaios::prever(&banco, &ensaio_id)?)
+}
+
+#[tauri::command]
+pub fn publicar_rascunho(
+    estado: State<EstadoApp>,
+    ensaio_id: String,
+    escolhas: Vec<(String, LadoDoConflito)>,
+) -> ResultadoIpc<PreviaPublicacao> {
+    let banco = estado.banco()?;
+    Ok(nucleo::ensaios::publicar(&banco, estado.orquestrador(), &ensaio_id, &escolhas)?)
+}
+
+/// Servidores MCP externos de um papel. Os cabeçalhos vêm do front porque é lá
+/// que o usuário os digita, e vão direto para o banco sem voltar.
+#[tauri::command]
+pub fn definir_mcp_do_papel(
+    estado: State<EstadoApp>,
+    id: String,
+    servidores: Vec<ServidorMcp>,
+) -> ResultadoIpc<Papel> {
+    Ok(estado.banco()?.definir_mcp_do_papel(&id, &servidores)?.sem_segredos())
 }

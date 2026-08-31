@@ -44,7 +44,7 @@ mod testes {
 
     /// Quantas migrations existem hoje. Ao somar uma, este número sobe junto —
     /// é o lembrete de que o esquema mudou e o teste de baixo cobre a subida.
-    const VERSAO_ESQUEMA: i64 = 5;
+    const VERSAO_ESQUEMA: i64 = 6;
 
     #[test]
     fn migration_aplica_e_e_idempotente() {
@@ -1990,10 +1990,15 @@ mod testes {
         assert_eq!(r.codigo, 202);
         assert!(r.corpo.is_empty(), "respondemos a uma notificação: {}", r.corpo);
 
-        // 4. `tools/list` traz as dez ferramentas do §6.
+        // 4. `tools/list` traz o que ESTE nó alcança — não o catálogo inteiro.
+        //    O filtro por papel mora aqui desde o M5; ver
+        //    `o_tools_list_esconde_o_que_o_papel_nao_alcanca`.
         let r = chamar(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
         let v: serde_json::Value = serde_json::from_str(&r.corpo).unwrap();
-        assert_eq!(v["result"]["tools"].as_array().unwrap().len(), ferramentas::catalogo().len());
+        assert_eq!(
+            v["result"]["tools"].as_array().unwrap().len(),
+            papeis::ferramentas_do_papel(None).len()
+        );
 
         // 5. Método que não existe vira erro de JSON-RPC, não 500.
         let r = chamar(json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/list" }));
@@ -2088,7 +2093,7 @@ mod testes {
         for f in ferramentas::FERRAMENTAS_QUE_GRAVAM {
             let completo = ferramentas::nome_completo(f);
             assert!(crate::barramento::pede_licenca(&completo), "{completo} escapou do card");
-            assert!(crate::barramento::matcher_do_hook().contains(&completo));
+            assert!(crate::barramento::matcher_do_hook(&[]).contains(&completo));
             // Gravar na pasta aceita "não perguntar de novo", como o `Write`.
             assert!(crate::barramento::aceita_regra(&completo));
         }
@@ -2282,6 +2287,7 @@ mod testes {
                 modelo: None,
                 embutido: false,
                 criado_em: 0,
+                mcp: vec![],
             };
             for f in papeis::ferramentas_do_papel(Some(&papel)) {
                 if ferramentas::FERRAMENTAS_QUE_GRAVAM.contains(&f.as_str()) {
@@ -2309,6 +2315,7 @@ mod testes {
             modelo: None,
             embutido: false,
             criado_em: 0,
+            mcp: vec![],
         };
 
         let cauteloso = papeis::ferramentas_do_papel(Some(&com(Autonomia::Cauteloso)));
@@ -2341,6 +2348,7 @@ mod testes {
             modelo: None,
             embutido: false,
             criado_em: 0,
+            mcp: vec![],
         };
         let tem = papeis::ferramentas_do_papel(Some(&esperto));
         assert_eq!(tem, vec!["ler_nota".to_string()], "a autonomia foi contornada: {tem:?}");
@@ -3038,5 +3046,154 @@ mod testes {
 
         let erro = ensaios::criar(&b, &ws.id, "Rascunho").expect_err("sem repo não há rascunho");
         assert!(erro.to_string().contains("Git não está instalado"), "{erro}");
+    }
+
+    #[test]
+    fn o_tools_list_esconde_o_que_o_papel_nao_alcanca() {
+        // Correção medida no M5: `--tools` com `--restricted` gateia as
+        // ferramentas NATIVAS, não as de MCP. Rodando com `--tools "Read"` e o
+        // nosso servidor no `--mcp-config`, o `system/init` listou `Read` mais
+        // todas as nossas. Quem tem de esconder somos nós, aqui.
+        let p = ponte();
+        let token = p.banco.lock().unwrap().token_da_sessao(&p.a.id).unwrap();
+        let listar = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })
+            .to_string();
+        let nomes = |corpo: &str| -> Vec<String> {
+            let v: serde_json::Value = serde_json::from_str(corpo).unwrap();
+            v["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // Sem papel: tudo, menos montar time.
+        let r = crate::mcp::tratar(&p.orq, &p.banco, &token, &listar);
+        let sem_papel = nomes(&r.corpo);
+        assert!(sem_papel.contains(&"escrever_arquivo".to_string()));
+        assert!(!sem_papel.contains(&"recrutar".to_string()));
+
+        // Com um papel cauteloso: sem escrita nenhuma.
+        let pesquisador = {
+            let b = p.banco.lock().unwrap();
+            b.papel_por_nome("Pesquisador").unwrap().unwrap()
+        };
+        p.banco
+            .lock()
+            .unwrap()
+            .definir_papel_do_no(&p.a.node_id, Some(&pesquisador.id))
+            .unwrap();
+        let r = crate::mcp::tratar(&p.orq, &p.banco, &token, &listar);
+        let com_papel = nomes(&r.corpo);
+        assert!(!com_papel.contains(&"escrever_arquivo".to_string()), "{com_papel:?}");
+        assert!(!com_papel.contains(&"escrever_nota".to_string()), "{com_papel:?}");
+        assert!(com_papel.contains(&"ler_arquivo".to_string()), "{com_papel:?}");
+        assert!(com_papel.len() < sem_papel.len());
+
+        // E esconder não é impedir: chamar mesmo assim continua sendo recusado.
+        let r = crate::mcp::tratar(
+            &p.orq,
+            &p.banco,
+            &token,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "escrever_arquivo",
+                            "arguments": { "caminho": "x.txt", "conteudo": "oi" } },
+            })
+            .to_string(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&r.corpo).unwrap();
+        assert_eq!(v["result"]["isError"], true, "escondido mas não impedido");
+    }
+
+    // ---- host MCP: servidores de fora ------------------------------------
+
+    #[test]
+    fn ferramenta_de_servidor_externo_sempre_pede_card() {
+        // O §8 é explícito: ação externa sempre pede aprovação, em qualquer
+        // nível de autonomia. E aqui o hook é a ÚNICA linha de defesa — a
+        // chamada vai direto do processo do agente para o servidor do outro, e
+        // nós nunca a vemos.
+        let crm = ServidorMcp {
+            nome: "crm".into(),
+            url: "https://exemplo.invalido/mcp".into(),
+            cabecalhos: vec![("Authorization".into(), "Bearer segredo".into())],
+        };
+
+        // O matcher pega tudo do servidor, por curinga: não sabemos que
+        // ferramentas ele oferece, e não precisamos saber.
+        let matcher = crate::barramento::matcher_do_hook(std::slice::from_ref(&crm));
+        assert!(matcher.contains("mcp__crm__.*"), "{matcher}");
+
+        // E o veredito não deixa passar como se fosse leitura.
+        assert!(crate::barramento::e_de_fora("mcp__crm__buscar_cliente", std::slice::from_ref(&crm)));
+        assert!(!crate::barramento::e_de_fora("mcp__mutirao__ler_nota", std::slice::from_ref(&crm)));
+
+        // Nunca aceita "não perguntar de novo": liberar o CRM de alguém de uma
+        // vez seria acesso permanente num clique que ninguém lembra depois.
+        assert!(!crate::barramento::aceita_regra("mcp__crm__buscar_cliente"));
+    }
+
+    #[test]
+    fn nome_de_servidor_externo_nao_pode_virar_curinga() {
+        // O nome entra num matcher que é REGEX. Um ponto ou asterisco aqui
+        // viraria curinga e abriria buraco na aprovação sem ninguém perceber —
+        // um servidor chamado ".*" faria `mcp__.*__.*` casar com tudo... e um
+        // chamado "a|Bash" faria o matcher aceitar `Bash` como alternativa.
+        let b = Banco::em_memoria().unwrap();
+        let p = b
+            .criar_papel("Vendas", "Você vende.", &[], Autonomia::Padrao, None, false)
+            .unwrap();
+        for ruim in [".*", "a|b", "crm-x", "com espaço", ""] {
+            let erro = b.definir_mcp_do_papel(
+                &p.id,
+                &[ServidorMcp { nome: ruim.into(), url: "http://x".into(), cabecalhos: vec![] }],
+            );
+            assert!(erro.is_err(), "aceitou o nome {ruim:?}");
+        }
+        // E o nome honesto passa.
+        let ok = b
+            .definir_mcp_do_papel(
+                &p.id,
+                &[ServidorMcp {
+                    nome: "crm_interno".into(),
+                    url: "http://127.0.0.1:9/mcp".into(),
+                    cabecalhos: vec![("X-Chave".into(), "segredo".into())],
+                }],
+            )
+            .unwrap();
+        assert_eq!(ok.mcp.len(), 1);
+    }
+
+    #[test]
+    fn a_chave_do_servidor_externo_nao_atravessa_a_fronteira_ipc() {
+        // Mesma regra do token da sessão: o que chega ao front chega a tudo
+        // que roda no front, e a chave do CRM de alguém não é diferente.
+        let b = Banco::em_memoria().unwrap();
+        let p = b
+            .criar_papel("Vendas", "Você vende.", &[], Autonomia::Padrao, None, false)
+            .unwrap();
+        let com_chave = b
+            .definir_mcp_do_papel(
+                &p.id,
+                &[ServidorMcp {
+                    nome: "crm".into(),
+                    url: "http://127.0.0.1:9/mcp".into(),
+                    cabecalhos: vec![("Authorization".into(), "Bearer segredo-do-crm".into())],
+                }],
+            )
+            .unwrap();
+
+        // O banco guarda, senão o adaptador não teria o que mandar ao servidor.
+        assert_eq!(
+            b.obter_papel(&p.id).unwrap().mcp[0].cabecalhos[0].1,
+            "Bearer segredo-do-crm"
+        );
+
+        // Mas o que vai para o front, não.
+        let json = serde_json::to_string(&com_chave.sem_segredos()).unwrap();
+        assert!(!json.contains("segredo-do-crm"), "a chave vazou: {json}");
+        assert!(json.contains("crm"), "o nome do servidor tem de aparecer: {json}");
     }
 }

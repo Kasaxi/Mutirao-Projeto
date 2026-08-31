@@ -687,6 +687,48 @@ pub struct Papel {
     /// Veio com o app. Não dá para apagar — o usuário duplica e edita a cópia.
     pub embutido: bool,
     pub criado_em: Instante,
+    /// Servidores MCP externos deste papel. É a decisão do §7 — ser host MCP
+    /// em vez de escrever integração.
+    #[serde(default)]
+    pub mcp: Vec<ServidorMcp>,
+}
+
+/// Um servidor MCP de fora, ligado a um papel.
+///
+/// Só HTTP por enquanto, e é escolha consciente: é o transporte que o nosso
+/// próprio barramento já fala, então o formato do `--mcp-config` já está
+/// medido. Servidor por stdio cabe no mesmo lugar quando aparecer o primeiro
+/// que importe — e aparecer primeiro é a diferença entre desenhar para um caso
+/// real e desenhar para um imaginado.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ServidorMcp {
+    /// Vira o prefixo que o modelo vê (`mcp__crm__buscar`) e entra no matcher
+    /// do hook, que é uma regex — por isso só letras, números e `_`.
+    pub nome: String,
+    pub url: String,
+    /// Cabeçalhos, tipicamente a autenticação.
+    ///
+    /// **Nunca atravessam a fronteira IPC** — o que chega ao front chega a
+    /// tudo que roda no front, e a chave do CRM de alguém merece a mesma
+    /// regra do token da sessão. Quem os tira é [`Papel::sem_segredos`], no
+    /// comando que devolve papéis ao front.
+    ///
+    /// A primeira tentativa foi `#[serde(skip_serializing)]` no campo, e ela
+    /// estava errada: o mesmo `Serialize` grava no banco, então o segredo
+    /// deixava de chegar ao IPC **e** ao disco — o adaptador ficava sem o que
+    /// mandar. Um teste pegou. Esconder é trabalho da borda, não do tipo.
+    #[serde(default)]
+    pub cabecalhos: Vec<(String, String)>,
+}
+
+impl Papel {
+    /// Uma cópia sem os segredos, para atravessar a fronteira IPC.
+    pub fn sem_segredos(mut self) -> Papel {
+        for s in &mut self.mcp {
+            s.cabecalhos.clear();
+        }
+        self
+    }
 }
 
 /// Teto de nós que uma cadeia pode recrutar.

@@ -24,6 +24,21 @@
 //! O "sempre" da última coluna não é ênfase: `Bash` não entra em
 //! `FERRAMENTAS_QUE_ACEITAM_REGRA`, então nem o "não perguntar de novo" o
 //! libera. Ver `barramento::aceita_regra`.
+//!
+//! ## Onde o papel é aplicado, e por quê em três lugares
+//!
+//! | Camada | O que faz | Vale para |
+//! |---|---|---|
+//! | `--tools` da CLI | esconde do modelo | só as **nativas** |
+//! | nosso `tools/list` | esconde do modelo | as do **§6** |
+//! | `ferramentas::executar` | **impede** | tudo |
+//!
+//! A primeira linha da tabela é uma correção: o M4 supôs que `--tools`
+//! gateava ferramenta de MCP também, e o M5 mediu que não. A ferramenta
+//! aparecia para o modelo mesmo fora do papel — e era recusada na execução,
+//! então o comportamento estava certo e a explicação errada. Esconder é
+//! economia de turno; impedir é segurança. As duas coisas moram em lugares
+//! diferentes de propósito, e só a última é obrigatória.
 
 use crate::db::Banco;
 use crate::erro::Resultado;

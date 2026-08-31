@@ -99,6 +99,13 @@ fn main() {
             comandos::listar_times,
             comandos::abrir_time,
             comandos::remover_time,
+            comandos::listar_rascunhos,
+            comandos::criar_rascunho,
+            comandos::trocar_rascunho,
+            comandos::descartar_rascunho,
+            comandos::prever_publicacao,
+            comandos::publicar_rascunho,
+            comandos::definir_mcp_do_papel,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao subir o Mutirão");

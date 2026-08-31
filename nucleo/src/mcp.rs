@@ -130,7 +130,38 @@ pub fn tratar(
 
         "ping" => Resposta::ok(resultado(id, json!({}))),
 
-        "tools/list" => Resposta::ok(resultado(id, json!({ "tools": ferramentas::catalogo() }))),
+        // O catálogo é **filtrado pelo papel do nó que perguntou**.
+        //
+        // Medido na CLI 2.1.251, e ao contrário do que o M4 supôs: `--tools`
+        // com `--restricted` gateia as ferramentas nativas, mas **não** as de
+        // MCP. Rodando com `--tools "Read"` e o nosso servidor no
+        // `--mcp-config`, o `system/init` listou `Read` mais TODAS as nossas
+        // ferramentas. Quem tem de esconder o que o papel não alcança somos
+        // nós, aqui, que é o único lado que conhece o papel.
+        //
+        // A checagem em `ferramentas::executar` continua — esconder é economia
+        // de turno, impedir é segurança, e as duas coisas moram em lugares
+        // diferentes de propósito.
+        "tools/list" => {
+            let papel = banco
+                .lock()
+                .ok()
+                .and_then(|b| {
+                    let no = b.obter_no(&sessao.node_id).ok()?;
+                    no.role_id.as_deref().and_then(|id| b.obter_papel(id).ok())
+                });
+            let permitidas = crate::papeis::ferramentas_do_papel(papel.as_ref());
+            let tools: Vec<Value> = ferramentas::catalogo()
+                .into_iter()
+                .filter(|f| {
+                    f.get("name")
+                        .and_then(Value::as_str)
+                        .map(|n| permitidas.iter().any(|p| p == n))
+                        .unwrap_or(false)
+                })
+                .collect();
+            Resposta::ok(resultado(id, json!({ "tools": tools })))
+        }
 
         "tools/call" => {
             let nome = params.get("name").and_then(Value::as_str).unwrap_or("");

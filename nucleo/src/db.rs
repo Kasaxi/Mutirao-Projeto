@@ -12,6 +12,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/003_regras_de_aprovacao.sql"),
     include_str!("../migrations/004_papeis.sql"),
     include_str!("../migrations/005_ensaios.sql"),
+    include_str!("../migrations/006_mcp_externo.sql"),
 ];
 
 pub struct Banco {
@@ -991,12 +992,13 @@ impl Banco {
             modelo: modelo.map(String::from),
             embutido,
             criado_em: agora(),
+            mcp: Vec::new(),
         };
         self.conn
             .execute(
                 "INSERT INTO role (id, nome, prompt, ferramentas_json, autonomia, modelo,
-                                   embutido, criado_em)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                   embutido, criado_em, mcp_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '[]')",
                 params![p.id, p.nome, p.prompt, serde_json::to_string(&p.ferramentas)?,
                         p.autonomia.como_texto(), p.modelo, p.embutido as i64, p.criado_em],
             )
@@ -1042,6 +1044,42 @@ impl Banco {
         ))?;
         let linhas = st.query_map([], le_papel)?;
         Ok(linhas.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Liga (ou desliga, com lista vazia) servidores MCP externos num papel.
+    ///
+    /// Toda ferramenta vinda deles passa pelo card, sempre e sem "não
+    /// perguntar de novo": elas saem da máquina, e o `ARQUITETURA.md §8` é
+    /// explícito em que ação externa sempre pede aprovação, em qualquer nível
+    /// de autonomia. Ver `barramento::e_de_fora`.
+    pub fn definir_mcp_do_papel(&self, id: &str, servidores: &[ServidorMcp]) -> Resultado<Papel> {
+        for s in servidores {
+            // O nome vira parte do nome da ferramenta que o modelo vê
+            // (`mcp__crm__buscar`) **e do matcher do hook, que é uma regex**.
+            // Um ponto, um asterisco ou uma barra vertical aqui viraria
+            // curinga no matcher e abriria buraco na aprovação sem ninguém
+            // perceber. Recusar na entrada é o único lugar em que isso é
+            // barato.
+            let nome_ok = !s.nome.trim().is_empty()
+                && s.nome.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !nome_ok {
+                return Err(Erro::invalido(format!(
+                    "\"{}\" não serve como nome de servidor: use só letras, números e _",
+                    s.nome
+                )));
+            }
+            if s.url.trim().is_empty() {
+                return Err(Erro::invalido("o servidor precisa de um endereço"));
+            }
+        }
+        let n = self.conn.execute(
+            "UPDATE role SET mcp_json = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(&servidores.to_vec())?],
+        )?;
+        if n == 0 {
+            return Err(Erro::nao_encontrado("papel", id));
+        }
+        self.obter_papel(id)
     }
 
     /// Edita um papel. Embutido também se edita — o que não se pode é apagar.
@@ -1361,11 +1399,14 @@ fn le_papel(r: &Row) -> rusqlite::Result<Papel> {
         modelo: r.get(5)?,
         embutido: r.get::<_, i64>(6)? != 0,
         criado_em: r.get(7)?,
+        // JSON quebrado vira lista vazia, não papel quebrado: um servidor
+        // externo malformado não pode impedir o agente de trabalhar.
+        mcp: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
     })
 }
 
 const COLUNAS_PAPEL: &str =
-    "id, nome, prompt, ferramentas_json, autonomia, modelo, embutido, criado_em";
+    "id, nome, prompt, ferramentas_json, autonomia, modelo, embutido, criado_em, mcp_json";
 
 const COLUNAS_ENSAIO: &str = "id, workspace_id, nome, branch, caminho_worktree,
                               base_commit, estado, criado_em, alterado_em";

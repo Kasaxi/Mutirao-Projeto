@@ -413,13 +413,19 @@ impl AdaptadorClaude {
         cmd
     }
 
-    /// O que o processo pode enxergar. `--restricted` tira tudo que não estiver
-    /// aqui, e isso vale para ferramenta de MCP também — nomeá-las é o que faz
-    /// a ponte existir para o modelo.
+    /// O que o processo pode enxergar.
     ///
-    /// Desde o M4 quem decide é o papel. Sem barramento no ar continua sendo
-    /// só leitura, seja qual for o papel: escrever sem quem aprove é o que a
-    /// §8 proíbe, e um papel não pode revogar isso.
+    /// `--restricted` tira toda ferramenta **nativa** que não estiver aqui.
+    /// **Não vale para ferramenta de MCP**, e isto foi medido no M5 depois de
+    /// o M4 supor o contrário: rodando com `--tools "Read"` e o nosso servidor
+    /// no `--mcp-config`, o `system/init` listou `Read` mais todas as nossas
+    /// ferramentas de MCP. Nomeá-las aqui não faz mal e documenta a intenção,
+    /// mas quem de fato esconde o que o papel não alcança é o nosso
+    /// `tools/list` — ver `mcp.rs` —, e quem impede é
+    /// `ferramentas::executar`.
+    ///
+    /// Sem barramento no ar continua sendo só leitura, seja qual for o papel:
+    /// escrever sem quem aprove é o que a §8 proíbe, e um papel não revoga isso.
     fn disponiveis(&self) -> String {
         if self.arquivo_settings.is_none() {
             return FERRAMENTAS_SO_LEITURA.to_string();
@@ -475,7 +481,9 @@ impl AdaptadorClaude {
                     // hook dispara para `mcp__mutirao__escrever_nota` também, e
                     // negar impede a chamada — é isso que permite um gate só
                     // para todos os caminhos de escrita.
-                    "matcher": crate::barramento::matcher_do_hook(),
+                    "matcher": crate::barramento::matcher_do_hook(
+                        &ctx.papel.as_ref().map(|p| p.mcp.clone()).unwrap_or_default(),
+                    ),
                     "hooks": [{
                         "type": "http",
                         "url": url,
@@ -508,15 +516,41 @@ impl AdaptadorClaude {
         let Some(url) = ctx.url_do_mcp() else {
             return Ok(None);
         };
-        let config = serde_json::json!({
-            "mcpServers": {
-                crate::ferramentas::SERVIDOR: {
-                    "type": "http",
-                    "url": url,
-                    "headers": { crate::barramento::CABECALHO_TOKEN: ctx.token },
-                },
-            },
-        });
+        let mut servidores = serde_json::Map::new();
+        servidores.insert(
+            crate::ferramentas::SERVIDOR.to_string(),
+            serde_json::json!({
+                "type": "http",
+                "url": url,
+                "headers": { crate::barramento::CABECALHO_TOKEN: ctx.token },
+            }),
+        );
+
+        // Os servidores externos do papel — a decisão do §7, ser host MCP em
+        // vez de escrever integração.
+        //
+        // Toda ferramenta que venha deles passa pelo card: o matcher do hook
+        // ganha `mcp__<nome>__.*` em `barramento::matcher_do_hook`. Medido na
+        // CLI 2.1.251: o curinga funciona — com o matcher `mcp__mutirao__.*` o
+        // hook disparou para `mcp__mutirao__listar_nos` e o "não" impediu a
+        // chamada.
+        //
+        // Isto não é excesso de zelo. Para as ferramentas do §6 temos duas
+        // linhas de defesa (o hook e o `ferramentas::executar`); para as de
+        // fora, o hook é a **única** — a chamada vai direto do processo do
+        // agente para o servidor do outro, e nós nunca a vemos.
+        for s in &ctx.papel.as_ref().map(|p| p.mcp.clone()).unwrap_or_default() {
+            let mut cabecalhos = serde_json::Map::new();
+            for (k, v) in &s.cabecalhos {
+                cabecalhos.insert(k.clone(), serde_json::Value::String(v.clone()));
+            }
+            servidores.insert(
+                s.nome.clone(),
+                serde_json::json!({ "type": "http", "url": s.url, "headers": cabecalhos }),
+            );
+        }
+
+        let config = serde_json::json!({ "mcpServers": servidores });
 
         let caminho = std::env::temp_dir().join(format!("mutirao-{}-mcp.json", ctx.session_id));
         std::fs::write(&caminho, serde_json::to_vec_pretty(&config)?)?;
