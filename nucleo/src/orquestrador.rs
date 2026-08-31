@@ -802,6 +802,19 @@ impl Orquestrador {
 
     // ------------------------------------------------------------- internos
 
+    /// Quantos adaptadores estão em cache. Só para o teste que guarda a troca
+    /// de rascunho — um adaptador vivo depois da troca aponta para a pasta
+    /// antiga, e é isso que o teste precisa ver.
+    pub fn quantos_vivos(&self) -> usize {
+        self.vivos.lock().map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// O contexto que o adaptador receberia agora. `pub(crate)` para o teste
+    /// poder conferir a pasta sem abrir processo nenhum.
+    pub fn contexto_de_teste(&self, sessao: &Sessao) -> Resultado<ContextoSessao> {
+        self.contexto(sessao)
+    }
+
     fn contexto(&self, sessao: &Sessao) -> Resultado<ContextoSessao> {
         let banco = self.banco()?;
         let no = banco.obter_no(&sessao.node_id)?;
@@ -814,7 +827,11 @@ impl Orquestrador {
             papel,
             session_id: sessao.id.clone(),
             node_id: sessao.node_id.clone(),
-            pasta: workspace.pasta,
+            // A pasta em que o trabalho acontece AGORA. O processo do agente
+            // recebe isto no `current_dir` e nunca mais muda de ideia — por
+            // isso trocar de rascunho derruba os adaptadores vivos, em
+            // `ensaios::trocar`.
+            pasta: banco.pasta_de_trabalho(&workspace.id)?,
             sessao_externa_id: sessao.sessao_externa_id.clone(),
             token: banco.token_da_sessao(&sessao.id)?,
             url_barramento: self.url_barramento.lock().ok().and_then(|u| u.clone()),

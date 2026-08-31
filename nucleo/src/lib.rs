@@ -12,7 +12,9 @@ pub mod arquivos;
 pub mod barramento;
 pub mod claude;
 pub mod db;
+pub mod ensaios;
 pub mod erro;
+pub mod git;
 pub mod ferramentas;
 pub mod mcp;
 pub mod modelo;
@@ -42,7 +44,7 @@ mod testes {
 
     /// Quantas migrations existem hoje. Ao somar uma, este número sobe junto —
     /// é o lembrete de que o esquema mudou e o teste de baixo cobre a subida.
-    const VERSAO_ESQUEMA: i64 = 4;
+    const VERSAO_ESQUEMA: i64 = 5;
 
     #[test]
     fn migration_aplica_e_e_idempotente() {
@@ -2697,5 +2699,344 @@ mod testes {
         assert!(doSeis.contains(&"escrever_nota".to_string()));
         assert!(doSeis.contains(&"enviar_para".to_string()));
         assert!(!doSeis.contains(&"recrutar".to_string()));
+    }
+
+    // ================================================================ M5 ===
+    // Rascunhos. Duas versões do mesmo trabalho ao mesmo tempo, e publicar uma
+    // delas sem o usuário entender de Git.
+
+    use crate::ensaios;
+
+    /// Bancada do M5: um workspace com pasta de verdade e histórico oculto.
+    ///
+    /// As duas pastas ficam fora uma da outra de propósito — é o desenho que
+    /// o `git.rs` documenta, e testar com o repositório dentro esconderia
+    /// justamente o que ele quer provar.
+    struct Obra {
+        banco: Arc<Mutex<Banco>>,
+        orq: Arc<Orquestrador>,
+        ws: String,
+        pasta: Pasta,
+        _repo: Pasta,
+    }
+
+    fn obra() -> Option<Obra> {
+        if !crate::git::existe() {
+            // Sem git na máquina o recurso não existe, e o teste diz isso em
+            // vez de falhar: é o mesmo desfecho que o app dá ao usuário.
+            eprintln!("git não instalado; pulando o teste de rascunhos");
+            return None;
+        }
+        let pasta = Pasta::nova();
+        let repo = Pasta::nova();
+        std::fs::write(pasta.0.join("contrato.txt"), "prazo de 18 meses\n").unwrap();
+
+        let banco = Banco::em_memoria().unwrap();
+        let ws = banco.criar_workspace("Obra", pasta.0.to_str().unwrap()).unwrap();
+        let caminho_repo = repo.0.join("historico");
+        banco.definir_repo(&ws.id, caminho_repo.to_str().unwrap()).unwrap();
+        let banco = Arc::new(Mutex::new(banco));
+
+        let orq = Arc::new(Orquestrador::novo(
+            banco.clone(),
+            Arc::new(FabricaFalsa::com_roteiro(roteiro_simples())),
+            sink_mudo(),
+        ));
+        assert!(ensaios::preparar(&banco.lock().unwrap(), &ws.id).unwrap());
+
+        Some(Obra { banco, orq, ws: ws.id, pasta, _repo: repo })
+    }
+
+    impl Obra {
+        fn banco(&self) -> std::sync::MutexGuard<'_, Banco> {
+            self.banco.lock().unwrap()
+        }
+    }
+
+    macro_rules! obra_ou_pula {
+        () => {
+            match obra() {
+                Some(o) => o,
+                None => return,
+            }
+        };
+    }
+
+    #[test]
+    fn a_pasta_do_usuario_fica_literalmente_limpa() {
+        // A `Decisão 3` promete "Git existe, mas o usuário nunca fica
+        // sabendo". Isto é a promessa medida: nenhum `.git`, nenhum
+        // `.mutirao`, nada para o Explorer mostrar.
+        let o = obra_ou_pula!();
+        let dentro: Vec<String> = std::fs::read_dir(&o.pasta.0)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(dentro, vec!["contrato.txt".to_string()], "sobrou coisa de Git: {dentro:?}");
+    }
+
+    #[test]
+    fn dois_rascunhos_do_mesmo_trabalho_rodam_ao_mesmo_tempo() {
+        // A primeira metade do critério do M5.
+        let o = obra_ou_pula!();
+        let a = ensaios::criar(&o.banco(), &o.ws, "Com a cláusula nova").unwrap();
+        let b = ensaios::criar(&o.banco(), &o.ws, "Sem a cláusula").unwrap();
+
+        // Cada um tem a sua cópia da pasta, e as duas começam iguais.
+        for e in [&a, &b] {
+            let copia = std::path::Path::new(&e.caminho_worktree).join("contrato.txt");
+            assert!(copia.exists(), "o rascunho \"{}\" nasceu vazio", e.nome);
+            assert_eq!(std::fs::read_to_string(copia).unwrap(), "prazo de 18 meses\n");
+        }
+
+        // Trabalham em paralelo sem se ver.
+        std::fs::write(
+            std::path::Path::new(&a.caminho_worktree).join("contrato.txt"),
+            "prazo de 24 meses\n",
+        )
+        .unwrap();
+        std::fs::write(
+            std::path::Path::new(&b.caminho_worktree).join("contrato.txt"),
+            "prazo de 12 meses\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(&b.caminho_worktree).join("contrato.txt"))
+                .unwrap(),
+            "prazo de 12 meses\n",
+            "um rascunho enxergou o outro"
+        );
+        // E a pasta de verdade não mudou nada.
+        assert_eq!(
+            std::fs::read_to_string(o.pasta.0.join("contrato.txt")).unwrap(),
+            "prazo de 18 meses\n",
+            "o trabalho de um rascunho vazou para a pasta de verdade"
+        );
+    }
+
+    #[test]
+    fn a_previa_nao_toca_em_nada_e_diz_o_que_muda() {
+        let o = obra_ou_pula!();
+        let e = ensaios::criar(&o.banco(), &o.ws, "Rascunho").unwrap();
+        let worktree = std::path::Path::new(&e.caminho_worktree);
+        std::fs::write(worktree.join("contrato.txt"), "prazo de 24 meses\n").unwrap();
+        // Um arquivo NOVO, que é o que um agente faz o tempo todo.
+        std::fs::write(worktree.join("parecer.txt"), "parecer novo\n").unwrap();
+
+        let previa = ensaios::prever(&o.banco(), &e.id).unwrap();
+        let por_caminho: Vec<(&str, TipoMudanca)> =
+            previa.alteracoes.iter().map(|m| (m.caminho.as_str(), m.como)).collect();
+        assert!(
+            por_caminho.contains(&("contrato.txt", TipoMudanca::Alterado)),
+            "{por_caminho:?}"
+        );
+        // O arquivo criado pelo agente PRECISA aparecer: `git add -u` não o
+        // pegaria, e ele sumiria na publicação sem ninguém notar.
+        assert!(por_caminho.contains(&("parecer.txt", TipoMudanca::Criado)), "{por_caminho:?}");
+        assert!(previa.conflitos.is_empty());
+
+        // E nada aconteceu na pasta de verdade — prévia é prévia.
+        assert_eq!(
+            std::fs::read_to_string(o.pasta.0.join("contrato.txt")).unwrap(),
+            "prazo de 18 meses\n"
+        );
+        assert!(!o.pasta.0.join("parecer.txt").exists(), "a prévia publicou");
+    }
+
+    #[test]
+    fn publicar_leva_o_rascunho_para_a_pasta_de_verdade() {
+        // A segunda metade do critério: "eu publico um deles sem entender de
+        // Git".
+        let o = obra_ou_pula!();
+        let e = ensaios::criar(&o.banco(), &o.ws, "Rascunho").unwrap();
+        let worktree = std::path::Path::new(&e.caminho_worktree);
+        std::fs::write(worktree.join("contrato.txt"), "prazo de 24 meses\n").unwrap();
+        std::fs::write(worktree.join("parecer.txt"), "parecer novo\n").unwrap();
+
+        let feito = ensaios::publicar(&o.banco(), &o.orq, &e.id, &[]).unwrap();
+        assert_eq!(feito.alteracoes.len(), 2);
+
+        assert_eq!(
+            std::fs::read_to_string(o.pasta.0.join("contrato.txt")).unwrap(),
+            "prazo de 24 meses\n"
+        );
+        assert!(o.pasta.0.join("parecer.txt").exists(), "o arquivo novo não chegou");
+        assert_eq!(o.banco().obter_ensaio(&e.id).unwrap().estado, EstadoEnsaio::Publicado);
+        // A pasta continua limpa depois de publicar.
+        assert!(!o.pasta.0.join(".git").exists());
+    }
+
+    #[test]
+    fn o_trabalho_feito_a_mao_nao_vira_lixo_de_merge() {
+        // Medido no probe: mesclar numa pasta com alteração não gravada NÃO é
+        // recusado pelo git — ele mescla e deixa marcador de conflito dentro
+        // do arquivo do usuário. Por isso `publicar` grava os dois lados antes.
+        let o = obra_ou_pula!();
+        let e = ensaios::criar(&o.banco(), &o.ws, "Rascunho").unwrap();
+        std::fs::write(
+            std::path::Path::new(&e.caminho_worktree).join("parecer.txt"),
+            "do rascunho\n",
+        )
+        .unwrap();
+
+        // O usuário mexeu na pasta enquanto o rascunho rodava.
+        std::fs::write(o.pasta.0.join("anotacoes.txt"), "minha anotação\n").unwrap();
+
+        ensaios::publicar(&o.banco(), &o.orq, &e.id, &[]).unwrap();
+
+        let minha = std::fs::read_to_string(o.pasta.0.join("anotacoes.txt")).unwrap();
+        assert_eq!(minha, "minha anotação\n", "o trabalho à mão foi mexido");
+        assert!(!minha.contains("<<<<"), "marcador de merge no arquivo do usuário");
+        assert!(o.pasta.0.join("parecer.txt").exists());
+    }
+
+    #[test]
+    fn conflito_sem_escolha_nao_publica_nada() {
+        // Publicar pela metade é pior que não publicar.
+        let o = obra_ou_pula!();
+        let e = ensaios::criar(&o.banco(), &o.ws, "Rascunho").unwrap();
+        std::fs::write(
+            std::path::Path::new(&e.caminho_worktree).join("contrato.txt"),
+            "versão do rascunho\n",
+        )
+        .unwrap();
+        std::fs::write(o.pasta.0.join("contrato.txt"), "versão da pasta\n").unwrap();
+
+        let previa = ensaios::prever(&o.banco(), &e.id).unwrap();
+        assert!(previa.conflitos.is_empty(), "a prévia vê conflito antes do commit da pasta?");
+
+        let erro = ensaios::publicar(&o.banco(), &o.orq, &e.id, &[])
+            .expect_err("devia recusar sem escolha");
+        assert!(erro.to_string().contains("ninguém escolheu"), "{erro}");
+        // A pasta ficou como estava, sem marcador nenhum.
+        let agora = std::fs::read_to_string(o.pasta.0.join("contrato.txt")).unwrap();
+        assert_eq!(agora, "versão da pasta\n", "publicou pela metade: {agora}");
+        assert_eq!(o.banco().obter_ensaio(&e.id).unwrap().estado, EstadoEnsaio::Aberto);
+    }
+
+    #[test]
+    fn escolher_um_lado_resolve_o_conflito() {
+        let o = obra_ou_pula!();
+        let e = ensaios::criar(&o.banco(), &o.ws, "Rascunho").unwrap();
+        std::fs::write(
+            std::path::Path::new(&e.caminho_worktree).join("contrato.txt"),
+            "versão do rascunho\n",
+        )
+        .unwrap();
+        std::fs::write(o.pasta.0.join("contrato.txt"), "versão da pasta\n").unwrap();
+
+        ensaios::publicar(
+            &o.banco(),
+            &o.orq,
+            &e.id,
+            &[("contrato.txt".to_string(), LadoDoConflito::Rascunho)],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(o.pasta.0.join("contrato.txt")).unwrap(),
+            "versão do rascunho\n"
+        );
+    }
+
+    #[test]
+    fn descartar_joga_o_rascunho_fora_e_nao_toca_na_pasta() {
+        let o = obra_ou_pula!();
+        let e = ensaios::criar(&o.banco(), &o.ws, "Rascunho ruim").unwrap();
+        std::fs::write(
+            std::path::Path::new(&e.caminho_worktree).join("besteira.txt"),
+            "não presta\n",
+        )
+        .unwrap();
+        ensaios::trocar(&o.banco(), &o.orq, &o.ws, Some(&e.id)).unwrap();
+
+        ensaios::descartar(&o.banco(), &o.orq, &e.id).unwrap();
+
+        assert_eq!(o.banco().obter_ensaio(&e.id).unwrap().estado, EstadoEnsaio::Descartado);
+        assert!(!std::path::Path::new(&e.caminho_worktree).exists(), "o worktree ficou no disco");
+        assert!(!o.pasta.0.join("besteira.txt").exists());
+        // E o foco voltou para a pasta de verdade, senão o trabalho seguinte
+        // aconteceria num caminho que não existe mais.
+        assert_eq!(o.banco().pasta_de_trabalho(&o.ws).unwrap(), o.pasta.0.to_string_lossy());
+    }
+
+    // ---- o perigo que o M4 anotou --------------------------------------
+
+    #[test]
+    fn a_pasta_de_trabalho_e_um_lugar_so() {
+        // O risco anotado no fim do M4: se dois lugares respondem "onde
+        // escrevo", uma sessão viva grava no worktree errado COM APROVAÇÃO
+        // LEGÍTIMA — o card diz a verdade sobre o conteúdo e mente sobre o
+        // destino. Este teste percorre os quatro caminhos que resolvem pasta.
+        let o = obra_ou_pula!();
+        let no = o.banco().criar_no(&o.ws, TipoNo::Agente, "A", 0.0, 0.0).unwrap();
+        let sessao = o.orq.abrir_sessao(&no.id, Adaptador::Falso).unwrap();
+        let e = ensaios::criar(&o.banco(), &o.ws, "Rascunho").unwrap();
+
+        // Antes de trocar: tudo aponta para a pasta de verdade.
+        assert_eq!(o.banco().pasta_de_trabalho(&o.ws).unwrap(), o.pasta.0.to_string_lossy());
+
+        ensaios::trocar(&o.banco(), &o.orq, &o.ws, Some(&e.id)).unwrap();
+
+        // Depois: tudo aponta para o rascunho. O contexto do adaptador é o
+        // caminho que mais importa — é ele que vira `current_dir` do processo.
+        assert_eq!(o.banco().pasta_de_trabalho(&o.ws).unwrap(), e.caminho_worktree);
+        let ctx = o.orq.contexto_de_teste(&sessao).unwrap();
+        assert_eq!(ctx.pasta, e.caminho_worktree, "o adaptador ficou na pasta antiga");
+
+        // E as ferramentas do §6 escrevem no rascunho, não na pasta.
+        o.banco().mudar_estado_sessao(&sessao.id, EstadoSessao::Pensando).unwrap();
+        ferramentas::executar(
+            &o.orq,
+            &o.banco,
+            &sessao,
+            "escrever_arquivo",
+            &serde_json::json!({ "caminho": "do-agente.txt", "conteudo": "oi" }),
+        )
+        .unwrap();
+        assert!(
+            std::path::Path::new(&e.caminho_worktree).join("do-agente.txt").exists(),
+            "a ferramenta escreveu fora do rascunho"
+        );
+        assert!(
+            !o.pasta.0.join("do-agente.txt").exists(),
+            "a ferramenta escreveu na pasta de verdade estando num rascunho"
+        );
+    }
+
+    #[test]
+    fn trocar_de_rascunho_derruba_os_adaptadores_vivos() {
+        // Um processo já aberto guarda a pasta antiga no diretório de trabalho
+        // dele, e ninguém avisa o processo de nada. A única saída é derrubá-lo.
+        let o = obra_ou_pula!();
+        let no = o.banco().criar_no(&o.ws, TipoNo::Agente, "A", 0.0, 0.0).unwrap();
+        let sessao = o.orq.abrir_sessao(&no.id, Adaptador::Falso).unwrap();
+        o.orq.enviar(&sessao.id, "oi").unwrap();
+        assert!(esperar(|| o.banco().obter_sessao(&sessao.id).unwrap().estado
+            == EstadoSessao::Ocioso));
+        assert_eq!(o.orq.quantos_vivos(), 1, "o adaptador não ficou em cache");
+
+        let e = ensaios::criar(&o.banco(), &o.ws, "Rascunho").unwrap();
+        ensaios::trocar(&o.banco(), &o.orq, &o.ws, Some(&e.id)).unwrap();
+
+        assert_eq!(o.orq.quantos_vivos(), 0, "sobrou adaptador apontando para a pasta antiga");
+        // A conversa fica: o usuário perde o processo, não o trabalho.
+        assert!(!o.banco().historico(&sessao.id, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sem_historico_o_app_continua_servindo_e_diz_por_que() {
+        // Workspace do M0 ao M4, ou máquina sem git: sem rascunho, mas o resto
+        // funciona. Perder o recurso é aceitável; fingir que ele funciona não.
+        let b = Banco::em_memoria().unwrap();
+        let ws = b.criar_workspace("Sem git", "/tmp/sem-git").unwrap();
+        assert_eq!(b.obter_workspace(&ws.id).unwrap().repo, None);
+        // A pasta de trabalho continua respondendo — é o que faz o resto do
+        // app não depender disto.
+        assert_eq!(b.pasta_de_trabalho(&ws.id).unwrap(), "/tmp/sem-git");
+
+        let erro = ensaios::criar(&b, &ws.id, "Rascunho").expect_err("sem repo não há rascunho");
+        assert!(erro.to_string().contains("Git não está instalado"), "{erro}");
     }
 }

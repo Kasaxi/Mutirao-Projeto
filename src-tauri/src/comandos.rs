@@ -178,7 +178,7 @@ pub fn listar_pasta(
     workspace_id: String,
     sub: String,
 ) -> ResultadoIpc<Vec<ItemArquivo>> {
-    let pasta = estado.banco()?.obter_workspace(&workspace_id)?.pasta;
+    let pasta = estado.banco()?.pasta_de_trabalho(&workspace_id)?;
     Ok(nucleo::arquivos::listar(std::path::Path::new(&pasta), &sub)?)
 }
 
@@ -229,7 +229,7 @@ fn nota_do_no(
     if no.tipo != TipoNo::Nota {
         return Err(nucleo::Erro::invalido("esse nó não é uma nota").into());
     }
-    let pasta = banco.obter_workspace(&no.workspace_id)?.pasta;
+    let pasta = banco.pasta_de_trabalho(&no.workspace_id)?;
     let arquivo = nucleo::arquivos::arquivo_da_nota_do_no(&no);
     if no.config.get("arquivo").is_none() {
         let mut config = no.config.clone();

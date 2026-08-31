@@ -11,6 +11,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/002_adaptador_falso.sql"),
     include_str!("../migrations/003_regras_de_aprovacao.sql"),
     include_str!("../migrations/004_papeis.sql"),
+    include_str!("../migrations/005_ensaios.sql"),
 ];
 
 pub struct Banco {
@@ -138,6 +139,7 @@ impl Banco {
             pasta: pasta.to_string(),
             criado_em: agora(),
             ensaio_ativo: None,
+            repo: None,
             viewport: Viewport::default(),
         };
         self.conn.execute(
@@ -151,7 +153,7 @@ impl Banco {
 
     pub fn listar_workspaces(&self) -> Resultado<Vec<Workspace>> {
         let mut st = self.conn.prepare(
-            "SELECT id, nome, pasta, criado_em, ensaio_ativo, vp_x, vp_y, vp_zoom
+            "SELECT id, nome, pasta, criado_em, ensaio_ativo, vp_x, vp_y, vp_zoom, repo
              FROM workspace ORDER BY criado_em DESC",
         )?;
         let linhas = st.query_map([], le_workspace)?;
@@ -160,7 +162,7 @@ impl Banco {
 
     pub fn obter_workspace(&self, id: &str) -> Resultado<Workspace> {
         let mut st = self.conn.prepare(
-            "SELECT id, nome, pasta, criado_em, ensaio_ativo, vp_x, vp_y, vp_zoom
+            "SELECT id, nome, pasta, criado_em, ensaio_ativo, vp_x, vp_y, vp_zoom, repo
              FROM workspace WHERE id = ?1",
         )?;
         st.query_row(params![id], le_workspace)
@@ -168,6 +170,44 @@ impl Banco {
                 rusqlite::Error::QueryReturnedNoRows => Erro::nao_encontrado("workspace", id),
                 outro => Erro::Banco(outro),
             })
+    }
+
+    /// **A pasta em que o trabalho acontece agora.**
+    ///
+    /// Ponto único, e é isso que importa: se o workspace tem um rascunho
+    /// aberto, é a pasta dele; senão, é a pasta do usuário. Todo lugar que
+    /// precisa saber "onde escrevo" passa por aqui — o contexto do adaptador,
+    /// as ferramentas do §6, a árvore de arquivos e as notas.
+    ///
+    /// Ter dois lugares que respondem isso seria o pior bug que este projeto
+    /// pode ter: uma sessão viva apontando para o worktree errado grava no
+    /// lugar errado **com aprovação legítima do usuário**. O card diria a
+    /// verdade sobre o conteúdo e mentiria sobre o destino.
+    pub fn pasta_de_trabalho(&self, workspace_id: &str) -> Resultado<String> {
+        let ws = self.obter_workspace(workspace_id)?;
+        let Some(id) = &ws.ensaio_ativo else {
+            return Ok(ws.pasta);
+        };
+        match self.obter_ensaio(id) {
+            Ok(e) if e.estado == EstadoEnsaio::Aberto => Ok(e.caminho_worktree),
+            // Rascunho publicado, descartado ou sumido: o trabalho volta para a
+            // pasta de verdade em vez de parar. Um ponteiro velho não pode
+            // deixar o workspace inutilizável.
+            _ => Ok(ws.pasta),
+        }
+    }
+
+    /// Onde fica o repositório oculto deste workspace. Quem escolhe é a casca:
+    /// onde ficam os dados de um app é pergunta do sistema operacional.
+    pub fn definir_repo(&self, workspace_id: &str, repo: &str) -> Resultado<()> {
+        let n = self.conn.execute(
+            "UPDATE workspace SET repo = ?2 WHERE id = ?1",
+            params![workspace_id, repo],
+        )?;
+        if n == 0 {
+            return Err(Erro::nao_encontrado("workspace", workspace_id));
+        }
+        Ok(())
     }
 
     pub fn salvar_viewport(&self, workspace_id: &str, vp: Viewport) -> Resultado<()> {
@@ -1055,6 +1095,113 @@ impl Banco {
         Ok(n as usize)
     }
 
+    // -------------------------------------------------------------- ensaios
+
+    pub fn criar_ensaio(
+        &self,
+        workspace_id: &str,
+        nome: &str,
+        branch: &str,
+        caminho_worktree: &str,
+        base_commit: Option<&str>,
+    ) -> Resultado<Ensaio> {
+        let nome = nome.trim();
+        if nome.is_empty() {
+            return Err(Erro::invalido("o rascunho precisa de um nome"));
+        }
+        self.obter_workspace(workspace_id)?;
+        let t = agora();
+        let e = Ensaio {
+            id: novo_id(),
+            workspace_id: workspace_id.to_string(),
+            nome: nome.to_string(),
+            branch: branch.to_string(),
+            caminho_worktree: caminho_worktree.to_string(),
+            base_commit: base_commit.map(String::from),
+            estado: EstadoEnsaio::Aberto,
+            criado_em: t,
+            alterado_em: t,
+        };
+        self.conn
+            .execute(
+                "INSERT INTO ensaio (id, workspace_id, nome, branch, caminho_worktree,
+                                     base_commit, estado, criado_em, alterado_em)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![e.id, e.workspace_id, e.nome, e.branch, e.caminho_worktree,
+                        e.base_commit, e.estado.como_texto(), e.criado_em, e.alterado_em],
+            )
+            .map_err(|erro| match erro {
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    Erro::invalido(format!("já existe um rascunho chamado \"{}\"", e.nome))
+                }
+                outro => Erro::Banco(outro),
+            })?;
+        Ok(e)
+    }
+
+    pub fn obter_ensaio(&self, id: &str) -> Resultado<Ensaio> {
+        let mut st =
+            self.conn.prepare(&format!("SELECT {COLUNAS_ENSAIO} FROM ensaio WHERE id = ?1"))?;
+        st.query_row(params![id], le_ensaio).map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Erro::nao_encontrado("rascunho", id),
+            outro => Erro::Banco(outro),
+        })
+    }
+
+    /// Os rascunhos de um workspace, os abertos primeiro. Publicado e
+    /// descartado ficam na lista de propósito: "o que aconteceu com aquele
+    /// rascunho?" precisa ter resposta.
+    pub fn listar_ensaios(&self, workspace_id: &str) -> Resultado<Vec<Ensaio>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {COLUNAS_ENSAIO} FROM ensaio WHERE workspace_id = ?1
+             ORDER BY (estado = 'aberto') DESC, alterado_em DESC"
+        ))?;
+        let linhas = st.query_map(params![workspace_id], le_ensaio)?;
+        Ok(linhas.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn mudar_estado_ensaio(&self, id: &str, estado: EstadoEnsaio) -> Resultado<()> {
+        let n = self.conn.execute(
+            "UPDATE ensaio SET estado = ?2, alterado_em = ?3 WHERE id = ?1",
+            params![id, estado.como_texto(), agora()],
+        )?;
+        if n == 0 {
+            return Err(Erro::nao_encontrado("rascunho", id));
+        }
+        Ok(())
+    }
+
+    /// Põe (ou tira, com `None`) o rascunho em foco.
+    ///
+    /// Quem chama **precisa** derrubar os adaptadores vivos depois — ver
+    /// `ensaios::trocar`. Um processo de agente já aberto guarda a pasta antiga
+    /// no diretório de trabalho dele, e ninguém avisa o processo de nada.
+    pub fn definir_ensaio_ativo(&self, workspace_id: &str, ensaio: Option<&str>) -> Resultado<()> {
+        if let Some(id) = ensaio {
+            let e = self.obter_ensaio(id)?;
+            if e.workspace_id != workspace_id {
+                return Err(Erro::invalido("esse rascunho é de outro workspace"));
+            }
+            if e.estado != EstadoEnsaio::Aberto {
+                return Err(Erro::invalido(format!(
+                    "o rascunho \"{}\" já foi {}",
+                    e.nome,
+                    e.estado.como_texto()
+                )));
+            }
+        }
+        let n = self.conn.execute(
+            "UPDATE workspace SET ensaio_ativo = ?2 WHERE id = ?1",
+            params![workspace_id, ensaio],
+        )?;
+        if n == 0 {
+            return Err(Erro::nao_encontrado("workspace", workspace_id));
+        }
+        Ok(())
+    }
+
     // ----------------------------------------------------------- partituras
 
     pub fn salvar_partitura(
@@ -1169,6 +1316,7 @@ fn le_workspace(r: &Row) -> rusqlite::Result<Workspace> {
         criado_em: r.get(3)?,
         ensaio_ativo: r.get(4)?,
         viewport: Viewport { x: r.get(5)?, y: r.get(6)?, zoom: r.get(7)? },
+        repo: r.get(8)?,
     })
 }
 
@@ -1218,6 +1366,27 @@ fn le_papel(r: &Row) -> rusqlite::Result<Papel> {
 
 const COLUNAS_PAPEL: &str =
     "id, nome, prompt, ferramentas_json, autonomia, modelo, embutido, criado_em";
+
+const COLUNAS_ENSAIO: &str = "id, workspace_id, nome, branch, caminho_worktree,
+                              base_commit, estado, criado_em, alterado_em";
+
+fn le_ensaio(r: &Row) -> rusqlite::Result<Ensaio> {
+    let estado: String = r.get(6)?;
+    Ok(Ensaio {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        nome: r.get(2)?,
+        branch: r.get(3)?,
+        caminho_worktree: r.get(4)?,
+        base_commit: r.get(5)?,
+        // O CHECK do banco já garante o domínio. Lixo aqui quer dizer banco
+        // editado por fora; tratar como descartado é o desfecho seguro — um
+        // rascunho que não se sabe o que é não pode virar o ativo.
+        estado: EstadoEnsaio::do_texto(&estado).unwrap_or(EstadoEnsaio::Descartado),
+        criado_em: r.get(7)?,
+        alterado_em: r.get(8)?,
+    })
+}
 
 fn le_partitura(r: &Row) -> rusqlite::Result<Partitura> {
     let snapshot: String = r.get(3)?;

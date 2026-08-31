@@ -230,7 +230,10 @@ pub fn executar(
             Some(id) => Some(b.obter_papel(id)?),
             None => None,
         };
-        (no.id, ws.id, ws.pasta, papel)
+        // A pasta do RASCUNHO em foco, não a do workspace. Ponto único — ver
+        // `Banco::pasta_de_trabalho`.
+        let pasta = b.pasta_de_trabalho(&ws.id)?;
+        (no.id, ws.id, pasta, papel)
     };
     let pasta = std::path::PathBuf::from(pasta);
 

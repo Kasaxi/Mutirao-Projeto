@@ -25,6 +25,9 @@ pub struct Workspace {
     pub pasta: String,
     pub criado_em: Instante,
     pub ensaio_ativo: Option<String>,
+    /// Onde mora o histórico oculto deste workspace. `None` = sem histórico:
+    /// workspace de antes do M5, ou máquina sem git. Ver `git.rs`.
+    pub repo: Option<String>,
     pub viewport: Viewport,
 }
 
@@ -747,6 +750,121 @@ pub struct CaboSalvo {
     pub de: usize,
     pub para: usize,
     pub tipo: TipoCabo,
+}
+
+// =========================================================== M5: ensaios ===
+
+/// Em que pé está um rascunho.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EstadoEnsaio {
+    /// Em uso. Só um rascunho aberto pode ser o ativo de um workspace.
+    Aberto,
+    /// Já foi para a pasta de verdade.
+    Publicado,
+    /// Jogado fora. A linha fica, para "o que aconteceu com aquele rascunho?"
+    /// ter resposta.
+    Descartado,
+}
+
+impl EstadoEnsaio {
+    pub fn como_texto(&self) -> &'static str {
+        match self {
+            EstadoEnsaio::Aberto => "aberto",
+            EstadoEnsaio::Publicado => "publicado",
+            EstadoEnsaio::Descartado => "descartado",
+        }
+    }
+
+    pub fn do_texto(s: &str) -> Option<EstadoEnsaio> {
+        Some(match s {
+            "aberto" => EstadoEnsaio::Aberto,
+            "publicado" => EstadoEnsaio::Publicado,
+            "descartado" => EstadoEnsaio::Descartado,
+            _ => return None,
+        })
+    }
+}
+
+/// Um rascunho: uma cópia isolada da pasta em que o time trabalha sem mexer no
+/// que está valendo.
+///
+/// O usuário nunca lê "branch" nem "worktree" — ele vê "Rascunho 2" e
+/// "Publicar". Os dois campos técnicos existem porque alguém precisa saber
+/// deles, e esse alguém é o `git.rs`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Ensaio {
+    pub id: String,
+    pub workspace_id: String,
+    pub nome: String,
+    pub branch: String,
+    pub caminho_worktree: String,
+    /// Commit da pasta de verdade quando este rascunho nasceu.
+    pub base_commit: Option<String>,
+    pub estado: EstadoEnsaio,
+    pub criado_em: Instante,
+    pub alterado_em: Instante,
+}
+
+/// O que a tela de publicar mostra **antes** do clique.
+///
+/// Nenhuma palavra de Git: "6 arquivos alterados, 1 conflito", e o conflito
+/// com os dois lados para escolher. Ver `ESPECIFICACAO.md §7`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreviaPublicacao {
+    pub ensaio_id: String,
+    pub alteracoes: Vec<MudancaArquivo>,
+    /// Arquivos que mudaram dos dois lados. Cada um precisa de uma escolha
+    /// antes de publicar — publicar pela metade é pior que não publicar.
+    pub conflitos: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MudancaArquivo {
+    pub caminho: String,
+    pub como: TipoMudanca,
+}
+
+/// A letra do git virada palavra de gente.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TipoMudanca {
+    Criado,
+    Alterado,
+    Apagado,
+    Renomeado,
+}
+
+impl TipoMudanca {
+    /// Traduz a letra de `git diff --name-status`. Desconhecida vira
+    /// `Alterado`: dizer "alterado" para uma cópia é impreciso; inventar uma
+    /// categoria nova na tela é pior.
+    pub fn da_letra(letra: &str) -> TipoMudanca {
+        match letra.chars().next() {
+            Some('A') => TipoMudanca::Criado,
+            Some('D') => TipoMudanca::Apagado,
+            Some('R') => TipoMudanca::Renomeado,
+            _ => TipoMudanca::Alterado,
+        }
+    }
+
+    pub fn como_texto(&self) -> &'static str {
+        match self {
+            TipoMudanca::Criado => "criado",
+            TipoMudanca::Alterado => "alterado",
+            TipoMudanca::Apagado => "apagado",
+            TipoMudanca::Renomeado => "renomeado",
+        }
+    }
+}
+
+/// De qual lado ficar num conflito. Espelha `git::Lado`, mas com nome de
+/// produto: o usuário escolhe entre "o que já estava" e "o que o rascunho fez".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LadoDoConflito {
+    Original,
+    Rascunho,
 }
 
 /// Uma permissão concedida com "não perguntar de novo".
