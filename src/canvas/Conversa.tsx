@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ADAPTADOR_ATUAL, escutar, ipc } from "../lib/ipc";
+import { escutar, ipc } from "../lib/ipc";
 import {
   ehErroIpc,
   formatarCusto,
@@ -63,7 +63,7 @@ export function Conversa({ no, aoMudarEstado }: Props) {
     let vivo = true;
     (async () => {
       try {
-        const s = await ipc.abrirSessao(no.id, ADAPTADOR_ATUAL);
+        const s = await ipc.abrirSessao(no.id);
         if (!vivo) return;
         setSessao(s);
         setEstado(s.estado);

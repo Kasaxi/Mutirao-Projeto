@@ -110,12 +110,27 @@ pub fn remover_cabo(estado: State<EstadoApp>, id: String) -> ResultadoIpc<()> {
 /// Abre a face conversa de um nó. Devolve a sessão existente se já houver —
 /// reabrir o app continua a conversa, não começa outra.
 #[tauri::command]
-pub fn abrir_sessao(
-    estado: State<EstadoApp>,
-    node_id: String,
-    adaptador: Adaptador,
-) -> ResultadoIpc<Sessao> {
-    Ok(estado.orquestrador().abrir_sessao(&node_id, adaptador)?)
+pub fn abrir_sessao(estado: State<EstadoApp>, node_id: String) -> ResultadoIpc<Sessao> {
+    // O adaptador não vem do front: quem sabe qual está disponível é quem
+    // procurou a CLI na máquina, na subida do app.
+    Ok(estado.orquestrador().abrir_sessao(&node_id, estado.adaptador())?)
+}
+
+/// Qual agente está de fato respondendo, e o que dizer sobre ele. A interface
+/// mostra isso na barra — um app que conversa com um roteiro e não avisa está
+/// mentindo para quem o usa.
+#[tauri::command]
+pub fn adaptador_em_uso(estado: State<EstadoApp>) -> ResultadoIpc<AdaptadorEmUso> {
+    Ok(AdaptadorEmUso {
+        adaptador: estado.adaptador(),
+        detalhe: estado.detalhe_do_adaptador().to_string(),
+    })
+}
+
+#[derive(serde::Serialize)]
+pub struct AdaptadorEmUso {
+    pub adaptador: Adaptador,
+    pub detalhe: String,
 }
 
 #[tauri::command]

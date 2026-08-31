@@ -5,10 +5,10 @@ Companheiro do `ARQUITETURA.md`. Aquele diz **o quê** e **por quê**; este diz
 abrir este arquivo e escrever a próxima função sem inventar nome, caminho ou
 formato.
 
-Estado atual: **M0 pronto e testado. M1 quase todo pronto** — sessão, turno,
-custo, face conversa e face terminal funcionam ponta a ponta contra o adaptador
-falso. Falta o adaptador Claude, e é ele que separa "conversa com roteiro" de
-"conversa com modelo". M2 em diante ainda é contrato, não código.
+Estado atual: **M0 e M1 prontos e testados**, o M1 contra o Claude Code de
+verdade — sessão, turno, cancelamento, custo, retomada, face conversa e face
+terminal. O M1 roda **somente leitura**: escrita só no M2, junto com o card de
+aprovação. M2 em diante ainda é contrato, não código.
 
 ---
 
@@ -29,10 +29,15 @@ mutirao/
 │   ├── migrations/
 │   │   ├── 001_inicial.sql        esquema completo, executável
 │   │   └── 002_adaptador_falso.sql  'falso' no CHECK de session.adaptador
+│   ├── testes/
+│   │   └── claude_stream.jsonl  saída REAL da CLI, guardada como fixture
+│   ├── tests/
+│   │   └── ao_vivo.rs      testes #[ignore] que rodam o Claude Code de verdade
 │   └── src/
-│       ├── lib.rs          fachada + 43 testes
+│       ├── lib.rs          fachada + 51 testes
 │       ├── modelo.rs       tipos de domínio, máquina de estados, preços
 │       ├── agente.rs       trait AgenteAdapter, Roteiro, adaptador falso
+│       ├── claude.rs       adaptador do Claude Code (CLI headless)
 │       ├── orquestrador.rs turno, bomba de eventos, custo
 │       ├── db.rs           migrations e todo o acesso a dados
 │       └── erro.rs         Erro, códigos estáveis
@@ -146,7 +151,8 @@ detalhe vai para o stderr.
 | `remover_no` | `id` | — | `nao_encontrado` |
 | `criar_cabo` | `workspaceId, deNode, paraNode, tipo` | `Cabo` | `invalido` (auto-ligação, duplicado) |
 | `remover_cabo` | `id` | — | `nao_encontrado` |
-| `abrir_sessao` | `nodeId, adaptador` | `Sessao` | `nao_encontrado`, `invalido` (nó não é agente) |
+| `abrir_sessao` | `nodeId` | `Sessao` | `nao_encontrado`, `invalido` (nó não é agente) |
+| `adaptador_em_uso` | — | `{ adaptador, detalhe }` | — |
 | `sessao_do_no` | `nodeId` | `Sessao \| null` | — |
 | `enviar_mensagem` | `sessionId, texto` | — | `invalido` (vazia, turno em andamento), `nao_encontrado` |
 | `cancelar_turno` | `sessionId` | — | `nao_encontrado` |
@@ -158,7 +164,13 @@ detalhe vai para o stderr.
 pode custar três chamadas de IPC.
 
 `abrir_sessao` devolve a sessão que já existir naquele nó. Reabrir o app
-continua a conversa; não começa outra.
+continua a conversa; não começa outra. **Não recebe `adaptador`**: quem decide
+qual agente responde é o backend, que é quem procurou a CLI na máquina. Front
+que escolhe isso acaba anunciando na barra um agente diferente do que respondeu.
+
+`adaptador_em_uso` existe para a barra dizer a verdade. Um app que conversa com
+um roteiro e não avisa é uma mentira; um que conversa com um modelo e não avisa
+é uma conta-surpresa.
 
 ### Eventos Rust → front
 
@@ -371,8 +383,23 @@ Nenhuma palavra de Git aparece. Binário não faz merge: escolhe-se um lado.
 
 | Camada | Como | Cobre |
 |---|---|---|
-| Núcleo | `cargo test -p nucleo` — 43 testes | migrations, CRUD, escopo dos cabos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token |
+| Núcleo | `cargo test -p nucleo` — 51 testes, offline e de graça | migrations, CRUD, escopo dos cabos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI |
 | Interface | `node testes-ui/fumaca.mjs` — 27 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; e um turno de ponta a ponta: pergunta, card de ação, resposta, custo, face terminal, parar |
+| Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` | o Claude Code de verdade: lê arquivo, responde, cobra, retoma a conversa, e reporta erro com a frase certa |
+
+**Duas pastas parecidas, de propósito.** `nucleo/testes/` guarda fixtures (nome
+em português, como o resto); `nucleo/tests/` é a pasta que o Cargo exige em
+inglês para testes de integração. Não unifique — o Cargo não deixa.
+
+Os testes ao vivo são `#[ignore]` porque gastam dinheiro e precisam de rede. Um
+`cargo test` normal continua offline e determinístico, que é a razão de o
+adaptador falso existir. Rode-os **ao subir de versão da CLI**: é lá que a forma
+dos eventos muda, e quando muda, os testes de fixture continuam passando
+sozinhos e felizes.
+
+O fixture `claude_stream.jsonl` é saída **capturada da CLI 2.1.251**, não uma
+invenção do que ela deveria devolver. Testar tradução contra JSON inventado só
+prova que sabemos escrever o que já escrevemos.
 
 O adaptador falso é obrigatório, não conveniência: testar orquestração contra a
 API de verdade é lento, caro e não-determinístico. Ele lê um roteiro
@@ -435,6 +462,82 @@ nunca zero: zero mentiria e sumiria do painel.
 No M1 quem tenta falar durante um turno leva recusa com mensagem clara, e a
 interface trava o campo. A fila em ordem é do M3, quando existir mais de um
 remetente possível — antes disso ela não teria o que enfileirar.
+
+### A que mais mexe no projeto: sem sidecar Node
+
+O `ARQUITETURA.md §9` escolheu "sidecar Node com o Agent SDK", com uma
+justificativa de uma linha: *entrada em streaming e `canUseTool` não existem na
+CLI pura*. Com a CLI 2.1.251 na mão, isso não se sustenta:
+
+- `--input-format stream-json` existe e está documentado no `--help`.
+- A aprovação de ferramenta sai por `--permission-prompt-tool`, apontando para
+  o servidor MCP do próprio app — que a §4 **já projeta**, com token e escopo
+  por nó. A via CLI é mais alinhada ao desenho existente, não menos.
+
+Sem a justificativa, sobra o custo: um runtime Node dentro do instalador do
+Windows, uma árvore de `node_modules` para manter e mais um processo entre o
+núcleo e o agente. O Rust faz o mesmo com `Command::spawn`.
+
+**Se você discordar, o estrago é pequeno de propósito:** trocar é reescrever
+`nucleo/src/claude.rs` e a linha da fábrica em `src-tauri/src/main.rs`. O trait
+existe justamente para essa decisão continuar reversível.
+
+### O custo vem da CLI, não da nossa tabela
+
+`preco_por_milhao` em `modelo.rs` continua existindo, mas **o adaptador Claude
+não a usa**: ele lê `total_cost_usd` do evento `result`.
+
+Não é preguiça, é aritmética. Medido num turno real:
+
+| | Tokens | |
+|---|---|---|
+| entrada nova | 6 | preço cheio |
+| gravação de cache | 6 071 | 1,25× |
+| leitura de cache | 108 511 | 0,1× |
+| saída | 263 | preço cheio |
+
+A CLI cobrou **US$ 0,0496**. A nossa tabela, que não sabe de cache, diria
+**US$ 0,58** — quase 12 vezes mais. Um painel de custo com esse erro é pior que
+painel nenhum, porque some a confiança em todos os outros números da tela.
+
+A tabela segue valendo para adaptador que não reporta custo. Hoje, o falso.
+
+### Somente leitura até o M2
+
+O M1 roda `--restricted` (tira Bash, execução de código e WebFetch, confina as
+ferramentas de arquivo ao diretório de trabalho e **ignora as configurações do
+usuário e do projeto**) mais um allowlist de `Read`, `Glob` e `Grep`.
+
+Ignorar as configurações da máquina é o detalhe que mais importa: sem isso o
+comportamento do agente dependeria do que houvesse em `~/.claude` de quem
+instalou, e o mesmo workspace se comportaria diferente em cada computador.
+
+Escrita chega quando existir o card de aprovação, não antes — `ARQUITETURA.md
+§8` é explícito, e um agente que grava sem pedir licença é exatamente o que ele
+proíbe.
+
+### O que a CLI não conta pelo `result`
+
+Nos dois erros que ela produziu de verdade — retomada de sessão inexistente e
+estouro de `--max-turns` — o campo `result` **nem existe**, e a frase que o
+usuário precisa ler sai pelo **stderr**:
+
+```
+No conversation found with session ID: 00000000-0000-0000-0000-000000000000
+```
+
+Por isso o adaptador **adia** o evento de erro sem texto até o stderr fechar, e
+manda a última linha dele. Sem esse adiamento o usuário lê "o agente terminou
+com erro (error_during_execution)", que não ajuda ninguém. É o que o teste
+`retomada_de_sessao_que_nao_existe_diz_o_que_houve` protege.
+
+Outros dois detalhes medidos, não supostos:
+
+- **`stdin` precisa ser fechado.** Sem `Stdio::null()`, a CLI espera 3 segundos
+  por dados que nunca vêm — em todo turno.
+- **Texto intermediário não entra no histórico.** O `result` traz só a resposta
+  final; a narração do meio do caminho é transmitida ao vivo pelos deltas e
+  depois substituída. Os cards de ação contam o que aconteceu no intervalo.
 
 ---
 
@@ -541,24 +644,34 @@ pronto do `ARQUITETURA.md`.
 - **M0** — *arrasto três caixas, fecho o app, reabro e está tudo no lugar.*
   Funciona.
 - **M1** — *peço "resuma este PDF" e vejo a resposta chegando em bolhas, com o
-  custo ao lado.* Funciona **contra o adaptador falso**, e o teste de fumaça
-  mede exatamente isso. Contra um modelo de verdade, ainda não: falta o
-  adaptador Claude.
+  custo ao lado.* Funciona, contra o Claude Code de verdade. Medido em
+  `nucleo/tests/ao_vivo.rs`.
 
-### O que falta no M1
+### O que ficou de fora do M1, com intenção
 
-1. **Adaptador Claude.** Um `AgenteAdapter` que sobe o Agent SDK num sidecar
-   Node e traduz a saída para `EventoAgente`. Tudo à volta já existe: a
-   `Fabrica` é o único lugar que precisa mudar, e o `ContextoSessao` já carrega
-   pasta, token do MCP e `sessao_externa_id`. Confira a ordem de resolução de
-   credencial na documentação do SDK ao escrever — não deduza.
-2. **Retomada de verdade.** A conversa já sobrevive ao fechamento: fica no
-   SQLite e volta ao reabrir o nó, e `sessao_externa_id` é gravado. Retomar a
-   sessão *do agente* depende do adaptador — é `--resume` no Claude Code, e só
-   dá para provar com ele no lugar.
-3. **Face terminal com histórico.** Hoje ela mostra o fluxo cru a partir do
-   turno seguinte, porque o fluxo não é gravado — só o que ele produz. Se valer
-   guardar, é uma tabela nova, e aí é decisão, não esquecimento.
+1. **Escrita.** O agente lê e não grava, porque o card de aprovação é do M2.
+   Trocar isso é acrescentar ferramentas ao allowlist em `claude.rs` — não
+   faça antes da aprovação existir.
+2. **Face terminal com histórico.** Ela mostra o fluxo cru a partir do turno
+   seguinte, porque o fluxo não é gravado — só o que ele produz. Guardar exige
+   tabela nova; é decisão, não esquecimento.
+3. **Modelo por papel.** O adaptador não passa `--model`: segue o que a CLI do
+   usuário estiver configurada para usar. Escolher modelo por papel é do M4,
+   quando papel existir.
+4. **Texto intermediário no histórico.** Ver §9.
 
-Ao escrever o adaptador Claude, escreva um roteiro novo para o falso no mesmo
-dia. É ele que mantém o custo de cada iteração em zero.
+### Começando o M2
+
+O M2 é *"o agente monta um `.xlsx` na minha pasta e eu aprovo a gravação antes
+de acontecer"*. A ordem que o M1 deixa pronta:
+
+1. Subir o servidor MCP do app com o token da §4 — a sessão já nasce com um,
+   guardado e nunca exposto ao front.
+2. Passar `--permission-prompt-tool` e trocar `--strict-mcp-config` pelo
+   `--mcp-config` com o nosso servidor, em `claude.rs`.
+3. Ligar `aguardando_aprovacao` na máquina de estados (a transição já existe e
+   já tem teste) ao card de aprovação da §7.
+4. Só então acrescentar as ferramentas de escrita ao allowlist.
+
+Escreva um roteiro novo para o adaptador falso no mesmo dia — é ele que mantém
+o custo de cada iteração em zero.

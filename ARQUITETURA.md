@@ -154,7 +154,7 @@ enum EventoAgente {
 
 | Adaptador | Como roda | Retomada | Aprovação de ferramenta |
 |---|---|---|---|
-| **Claude** | Preferir o Agent SDK (TypeScript) num sidecar Node — dá entrada em streaming na mesma sessão e callback `canUseTool`. Alternativa simples: `claude -p --output-format stream-json` | `--resume <session-id>`; sessões persistem em disco | `canUseTool` no SDK; na via CLI, `--permission-prompt-tool` apontando para o servidor MCP do app + `--allowedTools` |
+| **Claude** | **Implementado:** `claude --print --output-format stream-json --include-partial-messages`, processo por turno, lido pelo Rust. O sidecar Node foi descartado — ver a linha "Runtime Claude" na §9 | `--resume <session-id>`, verificado ao vivo | M1 roda `--restricted` + allowlist de leitura, porque não existe card de aprovação antes do M2. Depois: `--permission-prompt-tool` no servidor MCP do app |
 | **Codex** | `codex exec --json` (JSONL na stdout, `turn.completed`); `--output-schema` para resposta estruturada | `codex exec resume <id>` ou `--last` | `--sandbox workspace-write` como padrão; nunca acesso total sem pedir |
 | **PTY genérico** | `portable-pty` (Rust) sobre ConPTY, saída crua para xterm.js | Não há | Nenhuma. Só face terminal, modo avançado |
 
@@ -252,7 +252,7 @@ qualquer caminho que escape da pasta é negado antes de chegar ao disco.
 | Terminal | xterm.js com renderer WebGL | Padrão de fato; só na face terminal |
 | PTY | `portable-pty` (Rust) → ConPTY | API nativa do Windows; evita Node no caminho crítico |
 | Estado | SQLite (`rusqlite`) + arquivos | Metadados no banco, conteúdo em arquivo que abre no Explorer |
-| Runtime Claude | Sidecar Node com o Agent SDK | Entrada em streaming e `canUseTool` não existem na CLI pura |
+| Runtime Claude | ~~Sidecar Node com o Agent SDK~~ → **CLI headless, invocada pelo Rust** | Revisto no M1 com a CLI 2.1.251 na mão: `--input-format stream-json` existe, e a aprovação sai por `--permission-prompt-tool` apontando para o nosso próprio servidor MCP. Sem a justificativa, sobrava só o custo — Node dentro do instalador. Ver `ESPECIFICACAO.md §9` |
 | Versionamento | Git oculto (`git2` ou git embarcado) | Histórico, ensaios e conflito de graça |
 | Distribuição | MSI/NSIS + `tauri-plugin-updater` | Auto-update desde o dia um; reservar orçamento para assinatura de código (SmartScreen) |
 
@@ -275,10 +275,10 @@ Estimativa para um desenvolvedor com apoio pesado de agentes.
 
 **Pronto quando:** peço "resuma este PDF" e vejo a resposta chegando em bolhas, com o custo ao lado.
 
-**Onde está:** o critério passa contra o adaptador falso, medido pelo teste de fumaça — sessão,
-turno, cancelamento, cards de ação, custo por turno e por workspace, face conversa e face
-terminal. Falta o adaptador Claude, e com ele a retomada da sessão externa. A lista exata do que
-sobra está em `ESPECIFICACAO.md §12`.
+**Pronto.** Contra o Claude Code de verdade, não só contra o roteiro: `cargo test -p nucleo
+--test ao_vivo -- --ignored` lê um arquivo, responde, cobra o que a CLI cobrou e retoma a conversa
+no turno seguinte. O M1 roda somente leitura — escrita chega no M2, junto com o card de aprovação,
+porque agente que grava sem pedir licença é o que a §8 proíbe.
 
 ### M2 — Substrato de trabalho · 2 semanas
 - Pasta do workspace, nó de árvore de arquivos, notas Markdown editáveis no canvas

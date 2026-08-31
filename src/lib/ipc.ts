@@ -61,8 +61,12 @@ export const ipc = {
 
   // ------------------------------------------------------------- sessões
 
-  abrirSessao: (nodeId: string, adaptador: Adaptador) =>
-    chamar<Sessao>("abrir_sessao", { nodeId, adaptador }),
+  // Sem `adaptador`: quem decide qual agente responde é o backend, que é quem
+  // procurou a CLI na máquina. Um front que escolhe isso acaba mentindo.
+  abrirSessao: (nodeId: string) => chamar<Sessao>("abrir_sessao", { nodeId }),
+
+  adaptadorEmUso: () =>
+    chamar<{ adaptador: Adaptador; detalhe: string }>("adaptador_em_uso"),
 
   sessaoDoNo: (nodeId: string) => chamar<Sessao | null>("sessao_do_no", { nodeId }),
 
@@ -96,13 +100,6 @@ export async function escutar<T>(
 }
 
 export const modoNavegador = !dentroDoTauri;
-
-/**
- * Qual adaptador está rodando de verdade. No M1 é sempre o falso: roteiro em
- * vez de modelo. A interface mostra isso na barra, porque uma maquete que não
- * se anuncia é uma mentira.
- */
-export const ADAPTADOR_ATUAL: Adaptador = "falso";
 
 // ------------------------------------------------------------------ falso
 
@@ -455,6 +452,14 @@ async function falso<T>(comando: string, a: Record<string, any>): Promise<T> {
 
     // ----------------------------------------------------------- sessões
 
+    // O modo navegador não tem Rust por baixo, então também não tem CLI para
+    // chamar: aqui é sempre o roteiro, e a barra diz isso.
+    case "adaptador_em_uso":
+      return qualquer({
+        adaptador: "falso" as Adaptador,
+        detalhe: "modo navegador — roteiro de demonstração, nada é gravado",
+      });
+
     case "abrir_sessao": {
       const existente = mem.sessoes.find((s) => s.node_id === a.nodeId);
       if (existente) return qualquer(existente);
@@ -465,7 +470,7 @@ async function falso<T>(comando: string, a: Record<string, any>): Promise<T> {
       const s: Sessao = {
         id: id(),
         node_id: a.nodeId,
-        adaptador: a.adaptador,
+        adaptador: "falso",
         sessao_externa_id: null,
         estado: "ocioso",
         custo_total: 0,

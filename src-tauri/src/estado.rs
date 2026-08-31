@@ -15,11 +15,30 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub struct EstadoApp {
     banco: Arc<Mutex<Banco>>,
     orquestrador: Arc<Orquestrador>,
+    /// Qual adaptador a fábrica vai construir. Fica aqui, e não no front,
+    /// porque quem decide é quem descobriu se a CLI existe na máquina —
+    /// e uma interface que adivinha isso acaba mentindo.
+    adaptador: nucleo::Adaptador,
+    /// Uma linha para o usuário ler: versão da CLI, ou por que caiu no falso.
+    detalhe: String,
 }
 
 impl EstadoApp {
-    pub fn novo(banco: Arc<Mutex<Banco>>, orquestrador: Arc<Orquestrador>) -> Self {
-        EstadoApp { banco, orquestrador }
+    pub fn novo(
+        banco: Arc<Mutex<Banco>>,
+        orquestrador: Arc<Orquestrador>,
+        adaptador: nucleo::Adaptador,
+        detalhe: String,
+    ) -> Self {
+        EstadoApp { banco, orquestrador, adaptador, detalhe }
+    }
+
+    pub fn adaptador(&self) -> nucleo::Adaptador {
+        self.adaptador
+    }
+
+    pub fn detalhe_do_adaptador(&self) -> &str {
+        &self.detalhe
     }
 
     pub fn banco(&self) -> Result<MutexGuard<'_, Banco>, ErroIpc> {

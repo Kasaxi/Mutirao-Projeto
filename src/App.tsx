@@ -10,10 +10,11 @@ import {
   type Tela,
 } from "./canvas/viewport";
 import { adiar } from "./lib/adiar";
-import { ADAPTADOR_ATUAL, escutar, ipc, modoNavegador } from "./lib/ipc";
+import { escutar, ipc, modoNavegador } from "./lib/ipc";
 import {
   ehErroIpc,
   formatarCusto,
+  type Adaptador,
   type EstadoCanvas,
   type EstadoSessao,
   type EventoCusto,
@@ -41,6 +42,20 @@ export default function App() {
   // Quem sabe da conversa é cada <Conversa>; aqui mora só o resumo.
   const [estadosSessao, setEstadosSessao] = useState<Record<string, EstadoSessao>>({});
   const [custoTotal, setCustoTotal] = useState(0);
+  // Quem está de fato respondendo. Vem do backend, não de uma constante daqui:
+  // é ele que sabe se achou o Claude Code na máquina.
+  const [agente, setAgente] = useState<{ adaptador: Adaptador; detalhe: string } | null>(null);
+
+  useEffect(() => {
+    let vivo = true;
+    ipc
+      .adaptadorEmUso()
+      .then((a) => vivo && setAgente(a))
+      .catch(() => {});
+    return () => {
+      vivo = false;
+    };
+  }, []);
 
   const areaRef = useRef<HTMLDivElement>(null);
 
@@ -384,12 +399,17 @@ export default function App() {
         </div>
 
         <div className="direita">
-          {ADAPTADOR_ATUAL === "falso" && (
+          {agente?.adaptador === "falso" && (
             <span
               className="selo alerta"
-              title="As respostas vêm de um roteiro, não de um modelo. Nenhum token é gasto."
+              title={`As respostas vêm de um roteiro, não de um modelo. ${agente.detalhe}`}
             >
               adaptador falso
+            </span>
+          )}
+          {agente?.adaptador === "claude" && (
+            <span className="selo ok" title={`Claude Code ${agente.detalhe}`}>
+              claude code
             </span>
           )}
           {modoNavegador && (

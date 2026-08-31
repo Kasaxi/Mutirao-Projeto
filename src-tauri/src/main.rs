@@ -7,7 +7,10 @@ mod erro;
 mod estado;
 
 use estado::EstadoApp;
-use nucleo::{Banco, EventoNucleo, Fabrica, FabricaFalsa, Orquestrador, Sink};
+use nucleo::{
+    Adaptador, AdaptadorClaude, Banco, EventoNucleo, Fabrica, FabricaClaude, FabricaFalsa,
+    Orquestrador, Sink,
+};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -33,15 +36,11 @@ fn main() {
             let handle = app.handle().clone();
             let sink: Sink = Arc::new(move |evento| emitir(&handle, evento));
 
-            // M1 roda o adaptador falso: roteiro em vez de modelo. O adaptador
-            // Claude é a próxima peça. Até lá, o app conversa consigo mesmo —
-            // e diz isso na barra de cima, porque uma maquete que não se anuncia
-            // é uma mentira.
-            let fabrica: Arc<dyn Fabrica> = Arc::new(FabricaFalsa::demonstracao());
-            println!("[mutirao] adaptador: falso (roteiro de demonstração)");
+            let (fabrica, adaptador, detalhe) = escolher_adaptador();
+            println!("[mutirao] adaptador: {} — {detalhe}", adaptador.como_texto());
 
             let orquestrador = Arc::new(Orquestrador::novo(banco.clone(), fabrica, sink));
-            app.manage(EstadoApp::novo(banco, orquestrador));
+            app.manage(EstadoApp::novo(banco, orquestrador, adaptador, detalhe));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -57,6 +56,7 @@ fn main() {
             comandos::criar_cabo,
             comandos::remover_cabo,
             comandos::abrir_sessao,
+            comandos::adaptador_em_uso,
             comandos::sessao_do_no,
             comandos::enviar_mensagem,
             comandos::cancelar_turno,
@@ -66,6 +66,39 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("erro ao subir o Mutirão");
+}
+
+/// Decide quem responde: o Claude Code instalado, ou o roteiro.
+///
+/// A regra é procurar a CLI e usá-la; sem ela, cair no falso e **dizer isso**,
+/// no log e na barra do app. Cair calado no roteiro seria a pior falha de
+/// honestidade possível num programa que cobra por token — o usuário acharia
+/// que está conversando com um modelo.
+///
+/// `MUTIRAO_ADAPTADOR=falso` força o roteiro mesmo com a CLI instalada, que é
+/// o que se quer ao mexer na interface sem gastar dinheiro a cada recarga.
+fn escolher_adaptador() -> (Arc<dyn Fabrica>, Adaptador, String) {
+    let falso = || -> (Arc<dyn Fabrica>, Adaptador, String) {
+        (
+            Arc::new(FabricaFalsa::demonstracao()),
+            Adaptador::Falso,
+            "roteiro de demonstração — nenhum token é gasto".to_string(),
+        )
+    };
+
+    if std::env::var("MUTIRAO_ADAPTADOR").as_deref() == Ok("falso") {
+        return falso();
+    }
+
+    let claude = FabricaClaude::nova();
+    match AdaptadorClaude::detectar(claude.binario()) {
+        Ok(versao) => (Arc::new(claude), Adaptador::Claude, versao),
+        Err(e) => {
+            eprintln!("[mutirao] {e}");
+            let (f, a, _) = falso();
+            (f, a, format!("Claude Code não encontrado; usando roteiro. {e}"))
+        }
+    }
 }
 
 /// Nomes reservados em `ESPECIFICACAO.md §3`. O payload é o próprio

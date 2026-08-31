@@ -633,6 +633,12 @@ button:focus-visible,
   background: transparent;
 }
 
+.selo.ok {
+  color: var(--cabo-escreve);
+  border-color: transparent;
+  background: transparent;
+}
+
 .custo-total {
   font-variant-numeric: tabular-nums;
   color: var(--texto-fraco);

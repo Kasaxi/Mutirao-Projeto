@@ -8,12 +8,14 @@
 //! O shell (`src-tauri`) é uma casca fina por cima disto.
 
 pub mod agente;
+pub mod claude;
 pub mod db;
 pub mod erro;
 pub mod modelo;
 pub mod orquestrador;
 
 pub use agente::{AdaptadorFalso, AgenteAdapter, ContextoSessao, Fabrica, FabricaFalsa, Roteiro};
+pub use claude::{AdaptadorClaude, FabricaClaude};
 pub use db::Banco;
 pub use erro::{Erro, Resultado};
 pub use modelo::*;
@@ -682,6 +684,223 @@ mod testes {
 
         drop(b);
         let _ = std::fs::remove_file(&caminho);
+    }
+
+    // ---- adaptador Claude ------------------------------------------------
+    //
+    // Contra saída DE VERDADE da CLI 2.1.251, capturada e guardada em
+    // `nucleo/testes/claude_stream.jsonl`. Testar tradução contra um JSON
+    // inventado só prova que sabemos escrever o que já escrevemos; contra a
+    // saída real, prova que entendemos a CLI.
+
+    use crate::claude::{traduzir, Traducao};
+
+    fn eventos_do_fixture() -> Vec<EventoAgente> {
+        let bruto = include_str!("../testes/claude_stream.jsonl");
+        let mut t = Traducao::default();
+        let mut todos = Vec::new();
+        for linha in bruto.lines().filter(|l| !l.trim().is_empty()) {
+            todos.extend(traduzir(linha, &mut t));
+        }
+        todos
+    }
+
+    #[test]
+    fn traduz_o_stream_real_da_cli_em_eventos_do_mutirao() {
+        let eventos = eventos_do_fixture();
+
+        let inicio = eventos.iter().find_map(|e| match e {
+            EventoAgente::SessaoIniciada { id_externo, modelo, ferramentas } => {
+                Some((id_externo.clone(), modelo.clone(), ferramentas.len()))
+            }
+            _ => None,
+        });
+        let (id, modelo, ferramentas) = inicio.expect("faltou SessaoIniciada");
+        assert_eq!(id, "sess_exemplo");
+        assert!(modelo.starts_with("claude-"), "modelo: {modelo}");
+        assert!(ferramentas > 0, "o init precisa listar as ferramentas");
+
+        // O texto tem de chegar em pedaços — é o que faz a face conversa
+        // parecer conversa em vez de tela que pisca no fim.
+        let pedacos: Vec<&str> = eventos
+            .iter()
+            .filter_map(|e| match e {
+                EventoAgente::TextoParcial { delta } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(pedacos.len() >= 2, "esperava vários deltas, veio {}", pedacos.len());
+        assert!(pedacos.iter().all(|p| !p.is_empty()), "delta vazio não vira evento");
+
+        // Pedido e resultado de ferramenta, casados pelo id.
+        let pedidos: Vec<(String, String)> = eventos
+            .iter()
+            .filter_map(|e| match e {
+                EventoAgente::FerramentaPedida { id, nome, .. } => {
+                    Some((id.clone(), nome.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let concluidas: Vec<String> = eventos
+            .iter()
+            .filter_map(|e| match e {
+                EventoAgente::FerramentaConcluida { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!pedidos.is_empty(), "faltou FerramentaPedida");
+        for (id, _) in &pedidos {
+            assert!(concluidas.contains(id), "ferramenta {id} pedida e nunca concluída");
+        }
+        assert!(
+            pedidos.iter().any(|(_, nome)| nome == "Read"),
+            "esperava a ferramenta Read no fixture"
+        );
+
+        // A linha de atividade da CLI vira o "pensando" da interface.
+        assert!(
+            eventos.iter().any(|e| matches!(e, EventoAgente::Raciocinando { .. })),
+            "task_summary com detalhe deveria virar Raciocinando"
+        );
+    }
+
+    #[test]
+    fn o_custo_vem_da_cli_e_nao_da_nossa_tabela() {
+        // Este é o teste que justifica a decisão. No turno capturado a CLI
+        // cobrou US$ 0,0496; a tabela de preços daria US$ 0,58, porque ela não
+        // sabe que leitura de cache custa um décimo. Um painel de custo 11x
+        // errado é pior que painel nenhum.
+        let eventos = eventos_do_fixture();
+        let uso = eventos
+            .iter()
+            .find_map(|e| match e {
+                EventoAgente::TurnoConcluido { uso, .. } => Some(*uso),
+                _ => None,
+            })
+            .expect("faltou TurnoConcluido");
+
+        assert!((uso.custo_usd - 0.049_611_2).abs() < 1e-6, "custo: {}", uso.custo_usd);
+
+        // A entrada soma o contexto inteiro, cache incluído.
+        assert_eq!(uso.tokens_entrada, 6 + 6_071 + 108_511);
+        assert_eq!(uso.tokens_saida, 263);
+
+        let pela_tabela = custo_do_uso("claude-opus-5", uso.tokens_entrada, uso.tokens_saida);
+        assert!(
+            pela_tabela > uso.custo_usd * 10.0,
+            "a tabela deveria errar feio aqui: {pela_tabela} vs {}",
+            uso.custo_usd
+        );
+    }
+
+    #[test]
+    fn os_dois_erros_reais_da_cli_viram_evento_de_erro() {
+        // O fixture traz os dois que a CLI 2.1.251 produziu de verdade:
+        // retomada de sessão inexistente e estouro de --max-turns.
+        let eventos = eventos_do_fixture();
+        let erros: Vec<(String, bool)> = eventos
+            .iter()
+            .filter_map(|e| match e {
+                EventoAgente::Erro { mensagem, recuperavel } => {
+                    Some((mensagem.clone(), *recuperavel))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(erros.len(), 2, "veio {erros:?}");
+        assert!(erros.iter().all(|(_, r)| *r), "o nó precisa aceitar outro turno");
+        assert!(erros.iter().any(|(m, _)| m.contains("error_max_turns")), "veio {erros:?}");
+    }
+
+    #[test]
+    fn erro_sem_texto_e_marcado_para_o_stderr_completar() {
+        // Este é o achado que mais mudou o adaptador: nos dois erros reais o
+        // campo `result` **nem existe**, e a frase que o usuário precisa ler
+        // ("No conversation found with session ID: …") sai pelo stderr. Sem
+        // esta marca, o adaptador mandaria o genérico e jogaria fora a única
+        // informação útil.
+        let mut t = Traducao::default();
+        let linha = r#"{"type":"result","subtype":"error_during_execution","is_error":true,
+                        "session_id":"x","total_cost_usd":0}"#;
+        let eventos = traduzir(&linha.replace('\n', " "), &mut t);
+        assert!(matches!(eventos[0], EventoAgente::Erro { .. }));
+        assert!(t.erro_sem_texto, "sem isto o stderr é descartado");
+
+        // E o caminho oposto: erro COM texto não espera stderr nenhum.
+        let mut t2 = Traducao::default();
+        let com_texto = r#"{"type":"result","subtype":"error_during_execution","is_error":true,
+                            "result":"deu ruim aqui","total_cost_usd":0}"#;
+        traduzir(&com_texto.replace('\n', " "), &mut t2);
+        assert!(!t2.erro_sem_texto);
+    }
+
+    #[test]
+    fn linha_desconhecida_e_ignorada_em_vez_de_quebrar() {
+        // A CLI ganha tipos de evento a cada versão. Um adaptador que estoura
+        // ao ver um evento novo estoura no dia da atualização, na máquina do
+        // usuário.
+        let mut t = Traducao::default();
+        assert!(traduzir(r#"{"type":"invento_novo","valor":1}"#, &mut t).is_empty());
+        assert!(traduzir("isto não é json", &mut t).is_empty());
+        assert!(traduzir("", &mut t).is_empty());
+        assert!(traduzir(r#"{"type":"system","subtype":"task_summary","detail":null}"#, &mut t)
+            .is_empty());
+    }
+
+    #[test]
+    fn resultado_de_ferramenta_gigante_e_encolhido_antes_de_ir_para_o_banco() {
+        // `tool_call.resultado_json` é append-only. Guardar o arquivo inteiro a
+        // cada leitura incha o banco sem servir a ninguém: o card mostra "leu
+        // contrato.docx", não o contrato.
+        let enorme = "x".repeat(50_000);
+        let linha = serde_json::json!({
+            "type": "user",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "t1", "content": enorme }
+            ]}
+        })
+        .to_string();
+        let mut t = Traducao::default();
+        let eventos = traduzir(&linha, &mut t);
+        match &eventos[0] {
+            EventoAgente::FerramentaConcluida { resultado: Some(r), .. } => {
+                assert_eq!(r["truncado"], true);
+                assert!(r["conteudo"].as_str().unwrap().chars().count() <= 2_000);
+            }
+            outro => panic!("esperava FerramentaConcluida, veio {outro:?}"),
+        }
+    }
+
+    #[test]
+    fn ferramenta_que_falhou_vira_erro_no_card_e_nao_resultado() {
+        let linha = serde_json::json!({
+            "type": "user",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "t1",
+                  "content": "File does not exist.", "is_error": true }
+            ]}
+        })
+        .to_string();
+        let mut t = Traducao::default();
+        match &traduzir(&linha, &mut t)[0] {
+            EventoAgente::FerramentaConcluida { resultado, erro, .. } => {
+                assert!(resultado.is_none());
+                assert_eq!(erro.as_deref(), Some("File does not exist."));
+            }
+            outro => panic!("veio {outro:?}"),
+        }
+    }
+
+    #[test]
+    fn adaptador_claude_ausente_da_erro_que_diz_o_que_fazer() {
+        let r = crate::claude::AdaptadorClaude::detectar("claude-que-nao-existe-mesmo");
+        match r {
+            Err(Erro::Invalido(m)) => {
+                assert!(m.contains("MUTIRAO_CLAUDE_BIN"), "mensagem inútil: {m}");
+            }
+            outro => panic!("esperava erro explicativo, veio {outro:?}"),
+        }
     }
 
     #[test]
