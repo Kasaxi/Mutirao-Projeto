@@ -3,17 +3,23 @@ import type {
   Cabo,
   ChamadaFerramenta,
   CustoDoNo,
+  Decisao,
   EstadoCanvas,
   EstadoSessao,
   EventoAgente,
+  ItemArquivo,
   Mensagem,
   No,
+  Nota,
   PapelMensagem,
+  PedidoAprovacao,
+  RegraAprovacao,
   Sessao,
   TipoCabo,
   TipoNo,
   Workspace,
 } from "./tipos";
+import { FERRAMENTAS_QUE_ACEITAM_REGRA } from "./tipos";
 
 // Camada única de acesso ao núcleo. Nenhum componente chama `invoke` direto:
 // assim o contrato IPC fica num arquivo só, e o modo navegador existe.
@@ -83,6 +89,29 @@ export const ipc = {
 
   custoDoWorkspace: (workspaceId: string) =>
     chamar<{ total: number; por_no: CustoDoNo[] }>("custo_do_workspace", { workspaceId }),
+
+  // ------------------------------------------------------------ arquivos
+
+  listarPasta: (workspaceId: string, sub: string) =>
+    chamar<ItemArquivo[]>("listar_pasta", { workspaceId, sub }),
+
+  lerNota: (nodeId: string) => chamar<Nota>("ler_nota", { nodeId }),
+
+  escreverNota: (nodeId: string, conteudo: string) =>
+    chamar<void>("escrever_nota", { nodeId, conteudo }),
+
+  // ----------------------------------------------------------- aprovação
+
+  decidirAprovacao: (toolCallId: string, decisao: Decisao, lembrar: boolean) =>
+    chamar<void>("decidir_aprovacao", { toolCallId, decisao, lembrar }),
+
+  listarRegras: (workspaceId: string) =>
+    chamar<RegraAprovacao[]>("listar_regras", { workspaceId }),
+
+  revogarRegra: (id: string) => chamar<void>("revogar_regra", { id }),
+
+  aprovacoesPendentes: (sessionId: string) =>
+    chamar<PedidoAprovacao[]>("aprovacoes_pendentes", { sessionId }),
 };
 
 /**
@@ -118,7 +147,25 @@ const mem = {
   sessoes: [] as Sessao[],
   mensagens: [] as Mensagem[],
   acoes: [] as ChamadaFerramenta[],
+  regras: [] as RegraAprovacao[],
+  /** Sistema de arquivos de mentira: caminho relativo -> conteúdo. */
+  arquivos: new Map<string, string>(),
 };
+
+/** A pasta de exemplo do modo navegador, para a árvore ter o que mostrar. */
+function semearArquivos() {
+  if (mem.arquivos.size) return;
+  mem.arquivos.set("contratos/minuta.docx", "documento binário de mentira");
+  mem.arquivos.set("contratos/anexo-i.pdf", "pdf de mentira");
+  mem.arquivos.set("planilhas/orçamento.xlsx", "planilha de mentira");
+  mem.arquivos.set("Briefing.md", "# Briefing\n\nMemória compartilhada entre os agentes ligados.\n");
+}
+
+/** Espelho de `barramento::FERRAMENTAS_QUE_PEDEM_LICENCA`. */
+const PEDEM_LICENCA = ["Write", "Edit", "NotebookEdit", "Bash", "WebFetch"];
+
+/** Cards abertos: id da chamada -> quem destrava o turno quando o usuário clica. */
+const cardsAbertos = new Map<string, (d: Decisao) => void>();
 
 const id = () => crypto.randomUUID();
 const agora = () => Date.now();
@@ -158,6 +205,10 @@ const turnos = new Map<string, { parar: boolean }>();
 function roteiroDemonstracao(pergunta: string): { atrasoMs: number; eventos: EventoAgente[] } {
   const curto = pergunta.trim().split("\n")[0] ?? "";
   const resumo = curto.length > 40 ? `${curto.slice(0, 40).trimEnd()}…` : curto;
+  // Um id por chamada, como o Claude de verdade faz (`toolu_…`). Reaproveitar
+  // o id entre turnos fazia a segunda decisão cair na linha do turno anterior,
+  // que já estava decidida — e o agente ficava esperando para sempre.
+  const t = id().slice(0, 8);
   return {
     atrasoMs: 90,
     eventos: [
@@ -168,20 +219,38 @@ function roteiroDemonstracao(pergunta: string): { atrasoMs: number; eventos: Eve
         ferramentas: ["ler_arquivo", "listar_arquivos"],
       },
       { tipo: "raciocinando", resumo: "Procurando o documento na pasta do workspace." },
+      // Nomes de ferramenta iguais aos do Claude Code de verdade. O falso não
+      // serve para nada se falar uma língua que o adaptador real não fala.
       {
         tipo: "ferramenta_pedida",
-        id: "fer_1",
-        nome: "ler_arquivo",
-        argumentos: { caminho: "contrato-v3.docx" },
+        id: `fer_${t}_1`,
+        nome: "Read",
+        argumentos: { file_path: "contrato-v3.docx" },
       },
       {
         tipo: "ferramenta_concluida",
-        id: "fer_1",
+        id: `fer_${t}_1`,
         resultado: { bytes: 48213, truncado: false },
         erro: null,
       },
       { tipo: "texto_parcial", delta: "Li o material" },
       { tipo: "texto_parcial", delta: " sobre o documento." },
+      // Esta pede licença: é o que o card do M2 existe para interceptar.
+      {
+        tipo: "ferramenta_pedida",
+        id: `fer_${t}_2`,
+        nome: "Write",
+        argumentos: {
+          file_path: "resumo-do-contrato.md",
+          content: "# Resumo\n\nCláusula de reajuste cita índice extinto em 2023.\n",
+        },
+      },
+      {
+        tipo: "ferramenta_concluida",
+        id: `fer_${t}_2`,
+        resultado: { bytes: 74 },
+        erro: null,
+      },
       {
         tipo: "turno_concluido",
         texto_final:
@@ -195,6 +264,40 @@ function roteiroDemonstracao(pergunta: string): { atrasoMs: number; eventos: Eve
       },
     ],
   };
+}
+
+/** Espelho de `modelo::descrever_ferramenta`. */
+function descreverFerramenta(
+  ferramenta: string,
+  argumentos: Record<string, unknown>,
+): [string, string] {
+  const campo = (c: string) => (typeof argumentos[c] === "string" ? (argumentos[c] as string) : "");
+  const arquivo = (c: string) => campo(c).split(/[/\\]/).pop() ?? "";
+  const tamanho = (b: number) => (b < 1024 ? `${b} B` : `${(b / 1024).toFixed(1)} kB`);
+  switch (ferramenta) {
+    case "Write": {
+      const conteudo = campo("content");
+      return [
+        `Gravar ${arquivo("file_path")}`,
+        `${conteudo.split("\n").length} linhas · ${tamanho(conteudo.length)}`,
+      ];
+    }
+    case "Edit":
+    case "NotebookEdit":
+      return [`Alterar ${arquivo("file_path")}`, "trecho substituído no arquivo"];
+    case "Bash":
+      return ["Rodar um comando", campo("command").slice(0, 120)];
+    default:
+      return [`Usar ${ferramenta}`, JSON.stringify(argumentos).slice(0, 120)];
+  }
+}
+
+function previaDoConteudo(argumentos: Record<string, unknown>): string | null {
+  for (const chave of ["content", "new_string", "command"]) {
+    const v = argumentos[chave];
+    if (typeof v === "string") return v.length <= 600 ? v : `${v.slice(0, 600)}\n…`;
+  }
+  return null;
 }
 
 function sessaoFalsa(sessionId: string): Sessao {
@@ -244,12 +347,24 @@ async function rodarTurnoFalso(s: Sessao, pergunta: string) {
   turnos.set(s.id, controle);
   const { atrasoMs, eventos } = roteiroDemonstracao(pergunta);
   let acumulado = "";
+  const negados = new Set<string>();
 
   for (const evento of eventos) {
     await new Promise((r) => setTimeout(r, atrasoMs));
     if (controle.parar) return;
 
-    emitirFalso("sessao:evento", { tipo: "sessao_evento", session_id: s.id, evento });
+    // Ferramenta negada precisa CHEGAR como erro à interface. A interface
+    // monta o card de ação a partir do evento, não da memória daqui — mutar
+    // só a memória deixaria o card verde para uma gravação que não aconteceu.
+    const paraEmitir: EventoAgente =
+      evento.tipo === "ferramenta_concluida" && negados.has(`${s.id}:${evento.id}`)
+        ? { ...evento, resultado: null, erro: "Negado no Mutirão." }
+        : evento;
+    emitirFalso("sessao:evento", {
+      tipo: "sessao_evento",
+      session_id: s.id,
+      evento: paraEmitir,
+    });
 
     switch (evento.tipo) {
       case "sessao_iniciada":
@@ -258,24 +373,63 @@ async function rodarTurnoFalso(s: Sessao, pergunta: string) {
       case "texto_parcial":
         acumulado += evento.delta;
         break;
-      case "ferramenta_pedida":
-        mem.acoes.push({
-          id: `${s.id}:${evento.id}`,
+      case "ferramenta_pedida": {
+        const idChamada = `${s.id}:${evento.id}`;
+        const wsId = mem.nos.find((n) => n.id === s.node_id)?.workspace_id ?? "";
+        const precisa = PEDEM_LICENCA.includes(evento.nome);
+        const regra = mem.regras.find(
+          (r) => r.workspace_id === wsId && r.ferramenta === evento.nome,
+        );
+
+        const acao: ChamadaFerramenta = {
+          id: idChamada,
           session_id: s.id,
           ferramenta: evento.nome,
           argumentos: evento.argumentos,
           resultado: null,
           erro: null,
-          aprovacao: "automatica",
-          decidido_por: null,
+          aprovacao: !precisa ? "automatica" : regra ? "aprovada" : "pendente",
+          decidido_por: precisa && regra ? `regra:${evento.nome}` : null,
           criado_em: agora(),
-        });
+        };
+        mem.acoes.push(acao);
+
+        if (acao.aprovacao === "pendente") {
+          const [resumo, detalhe] = descreverFerramenta(evento.nome, evento.argumentos);
+          mudarEstadoFalso(s, "aguardando_aprovacao");
+          emitirFalso("aprovacao:pedida", {
+            tipo: "aprovacao_pedida",
+            pedido: {
+              tool_call_id: idChamada,
+              session_id: s.id,
+              node_id: s.node_id,
+              ferramenta: evento.nome,
+              resumo,
+              detalhe,
+              previa: previaDoConteudo(evento.argumentos),
+              criado_em: agora(),
+            },
+          });
+          // O turno para aqui, de verdade, até alguém clicar — é o que faz o
+          // card honesto: o arquivo não é gravado e desfeito, ele não chega
+          // a ser gravado.
+          const decisao = await new Promise<Decisao>((r) => cardsAbertos.set(idChamada, r));
+          if (controle.parar) return;
+          mudarEstadoFalso(s, "pensando");
+          if (decisao === "negada") negados.add(idChamada);
+        }
         break;
+      }
       case "ferramenta_concluida": {
-        const acao = mem.acoes.find((a) => a.id === `${s.id}:${evento.id}`);
+        const idChamada = `${s.id}:${evento.id}`;
+        const acao = mem.acoes.find((a) => a.id === idChamada);
         if (acao) {
-          acao.resultado = evento.resultado;
-          acao.erro = evento.erro;
+          if (negados.has(idChamada)) {
+            acao.erro = "Negado no Mutirão.";
+          } else {
+            acao.resultado = evento.resultado;
+            acao.erro = evento.erro;
+          }
         }
         break;
       }
@@ -506,6 +660,23 @@ async function falso<T>(comando: string, a: Record<string, any>): Promise<T> {
       const controle = turnos.get(s.id);
       if (controle) controle.parar = true;
       turnos.delete(s.id);
+      // Card aberto segura o turno. Cancelar sem fechá-lo deixaria a promessa
+      // pendurada para sempre e o card na tela sem dono.
+      for (const acao of mem.acoes) {
+        if (acao.session_id === s.id && acao.aprovacao === "pendente") {
+          acao.aprovacao = "negada";
+          acao.decidido_por = "turno cancelado";
+          cardsAbertos.get(acao.id)?.("negada");
+          cardsAbertos.delete(acao.id);
+          emitirFalso("aprovacao:decidida", {
+            tipo: "aprovacao_decidida",
+            tool_call_id: acao.id,
+            node_id: s.node_id,
+            decisao: "negada",
+            decidido_por: "turno cancelado",
+          });
+        }
+      }
       if (s.estado === "ocioso") return qualquer(undefined);
       gravarMensagemFalsa(s.id, "sistema", "Turno interrompido por você.");
       mudarEstadoFalso(s, "ocioso");
@@ -519,6 +690,127 @@ async function falso<T>(comando: string, a: Record<string, any>): Promise<T> {
 
     case "acoes_da_sessao":
       return qualquer(mem.acoes.filter((c) => c.session_id === a.sessionId));
+
+    // ---------------------------------------------------------- arquivos
+
+    case "listar_pasta": {
+      semearArquivos();
+      const sub = String(a.sub ?? "").replace(/\/$/, "");
+      const prefixo = sub ? `${sub}/` : "";
+      const vistos = new Map<string, ItemArquivo>();
+      for (const [caminho, conteudo] of mem.arquivos) {
+        if (!caminho.startsWith(prefixo)) continue;
+        const resto = caminho.slice(prefixo.length);
+        const barra = resto.indexOf("/");
+        if (barra === -1) {
+          vistos.set(resto, {
+            caminho,
+            nome: resto,
+            pasta: false,
+            tamanho: conteudo.length,
+          });
+        } else {
+          const nome = resto.slice(0, barra);
+          vistos.set(nome, {
+            caminho: prefixo + nome,
+            nome,
+            pasta: true,
+            tamanho: 0,
+          });
+        }
+      }
+      const itens = [...vistos.values()].sort(
+        (x, y) =>
+          Number(y.pasta) - Number(x.pasta) ||
+          x.nome.toLowerCase().localeCompare(y.nome.toLowerCase()),
+      );
+      return qualquer(itens);
+    }
+
+    case "ler_nota": {
+      semearArquivos();
+      const no = mem.nos.find((n) => n.id === a.nodeId);
+      if (!no) throw { codigo: "nao_encontrado", mensagem: "nó não encontrado" };
+      if (no.tipo !== "nota") throw { codigo: "invalido", mensagem: "esse nó não é uma nota" };
+      const arquivo = `${no.nome.replace(/[/\\:*?"<>|]/g, "-").trim() || "nota"}.md`;
+      return qualquer({ arquivo, conteudo: mem.arquivos.get(arquivo) ?? "" });
+    }
+
+    case "escrever_nota": {
+      const no = mem.nos.find((n) => n.id === a.nodeId);
+      if (!no) throw { codigo: "nao_encontrado", mensagem: "nó não encontrado" };
+      const arquivo = `${no.nome.replace(/[/\\:*?"<>|]/g, "-").trim() || "nota"}.md`;
+      mem.arquivos.set(arquivo, String(a.conteudo ?? ""));
+      return qualquer(undefined);
+    }
+
+    case "decidir_aprovacao": {
+      const acao = mem.acoes.find((c) => c.id === a.toolCallId);
+      if (!acao || acao.aprovacao !== "pendente")
+        throw { codigo: "nao_encontrado", mensagem: "não há o que decidir agora" };
+      const s = mem.sessoes.find((k) => k.id === acao.session_id);
+      const wsId = mem.nos.find((n) => n.id === s?.node_id)?.workspace_id ?? "";
+
+      if (a.lembrar && a.decisao === "aprovada") {
+        if (!FERRAMENTAS_QUE_ACEITAM_REGRA.includes(acao.ferramenta)) {
+          throw {
+            codigo: "invalido",
+            mensagem: `${acao.ferramenta} pergunta sempre: uma licença permanente para isso valeria pela máquina toda`,
+          };
+        }
+        if (!mem.regras.some((r) => r.workspace_id === wsId && r.ferramenta === acao.ferramenta)) {
+          mem.regras.push({
+            id: id(),
+            workspace_id: wsId,
+            ferramenta: acao.ferramenta,
+            criado_em: agora(),
+          });
+        }
+      }
+
+      acao.aprovacao = a.decisao;
+      acao.decidido_por = "usuario";
+      // O banco antes de soltar o agente: gravar depois deixaria o arquivo no
+      // disco antes de existir a linha que o autoriza.
+      cardsAbertos.get(acao.id)?.(a.decisao);
+      cardsAbertos.delete(acao.id);
+      emitirFalso("aprovacao:decidida", {
+        tipo: "aprovacao_decidida",
+        tool_call_id: acao.id,
+        node_id: s?.node_id ?? "",
+        decisao: a.decisao,
+        decidido_por: "usuario",
+      });
+      return qualquer(undefined);
+    }
+
+    case "aprovacoes_pendentes": {
+      const s = mem.sessoes.find((k) => k.id === a.sessionId);
+      return qualquer(
+        mem.acoes
+          .filter((c) => c.session_id === a.sessionId && c.aprovacao === "pendente")
+          .map((c) => {
+            const [resumo, detalhe] = descreverFerramenta(c.ferramenta, c.argumentos);
+            return {
+              tool_call_id: c.id,
+              session_id: c.session_id,
+              node_id: s?.node_id ?? "",
+              ferramenta: c.ferramenta,
+              resumo,
+              detalhe,
+              previa: previaDoConteudo(c.argumentos),
+              criado_em: c.criado_em,
+            };
+          }),
+      );
+    }
+
+    case "listar_regras":
+      return qualquer(mem.regras.filter((r) => r.workspace_id === a.workspaceId));
+
+    case "revogar_regra":
+      mem.regras = mem.regras.filter((r) => r.id !== a.id);
+      return qualquer(undefined);
 
     case "custo_do_workspace": {
       const daqui = mem.nos.filter((n) => n.workspace_id === a.workspaceId).map((n) => n.id);

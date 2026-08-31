@@ -237,6 +237,10 @@ Não existe modo "pula todas as permissões" na interface.
 vira card no nó, turno em `aguardando_aprovacao`, notificação ao usuário. Toda decisão vai para
 `tool_call` com quem decidiu e quando — log append-only, exportável.
 
+Implementado no M2 e medido: o agente fica **literalmente parado** enquanto o card espera, porque a
+requisição HTTP que ele fez para pedir licença fica segurada. O arquivo não é gravado e desfeito —
+ele não chega a ser gravado.
+
 Escopo de arquivos é verificado no núcleo com caminho canônico, não confiando no agente:
 qualquer caminho que escape da pasta é negado antes de chegar ao disco.
 
@@ -285,6 +289,15 @@ porque agente que grava sem pedir licença é o que a §8 proíbe.
 - Servidor MCP do app no ar com arquivos e notas; fluxo de aprovação com card
 
 **Pronto quando:** o agente monta um `.xlsx` na minha pasta e eu aprovo a gravação antes de acontecer.
+
+**Pronto.** Contra o Claude Code de verdade: o card aparece, o arquivo não existe enquanto ele está
+aberto, e passa a existir depois do clique. Negar impede de verdade, e o agente entende o "não" sem
+tentar contornar. A aprovação **não** saiu por `--permission-prompt-tool` (essa flag não existe mais)
+e sim por um hook `PreToolUse` do tipo HTTP — ver `ESPECIFICACAO.md §9`.
+
+As ferramentas de trabalho do §6 ainda não estão penduradas no barramento: o agente usa as nativas
+do Claude Code, confinadas à pasta. Elas entram junto com o `enviar_para` do M3, pela mesma porta e
+com o mesmo token.
 
 ### M3 — A ponte · 3 semanas
 - Cabos definindo quem fala com quem; ferramentas `enviar_para` e `avisar`

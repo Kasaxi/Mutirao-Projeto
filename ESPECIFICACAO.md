@@ -5,10 +5,11 @@ Companheiro do `ARQUITETURA.md`. Aquele diz **o quê** e **por quê**; este diz
 abrir este arquivo e escrever a próxima função sem inventar nome, caminho ou
 formato.
 
-Estado atual: **M0 e M1 prontos e testados**, o M1 contra o Claude Code de
-verdade — sessão, turno, cancelamento, custo, retomada, face conversa e face
-terminal. O M1 roda **somente leitura**: escrita só no M2, junto com o card de
-aprovação. M2 em diante ainda é contrato, não código.
+Estado atual: **M0, M1 e M2 prontos e testados** contra o Claude Code de
+verdade — sessão, turno, cancelamento, custo, retomada, face conversa, face
+terminal, e agora o barramento local com o card de aprovação, notas em arquivo
+e árvore da pasta. O agente grava, e só depois de você deixar. M3 em diante
+ainda é contrato, não código.
 
 ---
 
@@ -34,10 +35,12 @@ mutirao/
 │   ├── tests/
 │   │   └── ao_vivo.rs      testes #[ignore] que rodam o Claude Code de verdade
 │   └── src/
-│       ├── lib.rs          fachada + 51 testes
+│       ├── lib.rs          fachada + 69 testes
 │       ├── modelo.rs       tipos de domínio, máquina de estados, preços
 │       ├── agente.rs       trait AgenteAdapter, Roteiro, adaptador falso
 │       ├── claude.rs       adaptador do Claude Code (CLI headless)
+│       ├── barramento.rs   servidor local, escopo por token, aprovação
+│       ├── arquivos.rs     escopo de caminho, listar, ler e gravar
 │       ├── orquestrador.rs turno, bomba de eventos, custo
 │       ├── db.rs           migrations e todo o acesso a dados
 │       └── erro.rs         Erro, códigos estáveis
@@ -153,6 +156,13 @@ detalhe vai para o stderr.
 | `remover_cabo` | `id` | — | `nao_encontrado` |
 | `abrir_sessao` | `nodeId` | `Sessao` | `nao_encontrado`, `invalido` (nó não é agente) |
 | `adaptador_em_uso` | — | `{ adaptador, detalhe }` | — |
+| `decidir_aprovacao` | `toolCallId, decisao, lembrar` | — | `nao_encontrado` (já decidido), `invalido` (regra para ferramenta que pergunta sempre) |
+| `aprovacoes_pendentes` | `sessionId` | `PedidoAprovacao[]` | — |
+| `listar_regras` | `workspaceId` | `RegraAprovacao[]` | — |
+| `revogar_regra` | `id` | — | `nao_encontrado` |
+| `listar_pasta` | `workspaceId, sub` | `ItemArquivo[]` | `fora_do_escopo`, `io` |
+| `ler_nota` | `nodeId` | `{ arquivo, conteudo }` | `invalido` (nó não é nota) |
+| `escrever_nota` | `nodeId, conteudo` | — | `fora_do_escopo`, `io` |
 | `sessao_do_no` | `nodeId` | `Sessao \| null` | — |
 | `enviar_mensagem` | `sessionId, texto` | — | `invalido` (vazia, turno em andamento), `nao_encontrado` |
 | `cancelar_turno` | `sessionId` | — | `nao_encontrado` |
@@ -185,8 +195,8 @@ depender só do nome do evento.
 | `sessao:evento` | `{ tipo, session_id, evento: EventoAgente }` | a cada evento do adaptador | pronto |
 | `sessao:estado` | `{ tipo, session_id, node_id, estado, pede_atencao }` | mudança na máquina de estados | pronto |
 | `custo:atualizado` | `{ tipo, workspace_id, total, por_no }` | fim de turno | pronto |
-| `aprovacao:pedida` | `{ tool_call_id, session_id, ferramenta, argumentos }` | ferramenta exige aprovação | M2 |
-| `aprovacao:decidida` | `{ tool_call_id, aprovada }` | usuário decidiu | M2 |
+| `aprovacao:pedida` | `{ tipo, pedido: PedidoAprovacao }` | ferramenta exige aprovação | pronto |
+| `aprovacao:decidida` | `{ tipo, tool_call_id, node_id, decisao, decidido_por }` | alguém (ou uma regra) decidiu | pronto |
 | `no:mensagem` | `{ de_node, para_node, trace_id }` | mensagem entre nós, para animar o cabo | M3 |
 
 Regra: evento **notifica**, não carrega o histórico. O front pede o que
@@ -210,19 +220,31 @@ O `ARQUITETURA.md` deixou um buraco: o servidor MCP precisa saber **qual nó**
 está chamando, para aplicar o escopo dos cabos. Fica assim.
 
 Ao iniciar uma sessão, o núcleo gera um `token` opaco (32 bytes aleatórios,
-hex), grava em `session.token` e o injeta na configuração MCP daquele agente:
+hex) e grava em `session.token`. Ele viaja para o processo do agente num
+arquivo de `--settings` escrito por sessão — **em arquivo, não como JSON na
+linha de comando**, porque a linha de comando de um processo é legível por
+qualquer outro processo do mesmo usuário, e ali dentro vai o segredo.
+
+O que o M2 escreve nesse arquivo:
 
 ```json
 {
-  "mcpServers": {
-    "mutirao": {
-      "type": "http",
-      "url": "http://127.0.0.1:{porta}/mcp",
-      "headers": { "X-Mutirao-Token": "{token}" }
-    }
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Write|Edit|NotebookEdit|Bash|WebFetch",
+      "hooks": [{
+        "type": "http",
+        "url": "http://127.0.0.1:{porta}/aprovacao",
+        "headers": { "X-Mutirao-Token": "{token}" },
+        "timeout": 1860
+      }]
+    }]
   }
 }
 ```
+
+Quando o M3 acrescentar as ferramentas do §6, elas entram pela mesma porta e
+com o mesmo token, aí sim como servidor MCP (`--mcp-config`).
 
 Toda chamada de ferramenta é resolvida assim:
 
@@ -383,9 +405,9 @@ Nenhuma palavra de Git aparece. Binário não faz merge: escolhe-se um lado.
 
 | Camada | Como | Cobre |
 |---|---|---|
-| Núcleo | `cargo test -p nucleo` — 51 testes, offline e de graça | migrations, CRUD, escopo dos cabos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI |
-| Interface | `node testes-ui/fumaca.mjs` — 27 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; e um turno de ponta a ponta: pergunta, card de ação, resposta, custo, face terminal, parar |
-| Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` | o Claude Code de verdade: lê arquivo, responde, cobra, retoma a conversa, e reporta erro com a frase certa |
+| Núcleo | `cargo test -p nucleo` — 69 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras |
+| Interface | `node testes-ui/fumaca.mjs` — 36 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; um turno de ponta a ponta; o card de aprovação com aprovar, negar e "não perguntar de novo"; nota em arquivo e árvore da pasta |
+| Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` — 8 testes | o Claude Code de verdade: lê, responde, cobra, retoma, reporta erro com a frase certa, grava depois de aprovado, **não** grava quando negado e **não** grava sem barramento |
 
 **Duas pastas parecidas, de propósito.** `nucleo/testes/` guarda fixtures (nome
 em português, como o resto); `nucleo/tests/` é a pasta que o Cargo exige em
@@ -418,6 +440,11 @@ Três testes valem por si, porque cobrem coisa que falha calada:
   "pensando" não pede atenção, não aceita turno novo e não explica nada.
 - `migration_002_reconstroi_session_sem_perder_os_filhos` — reconstruir tabela
   com FK ligada apaga os filhos por CASCADE sem erro nenhum.
+- `link_simbolico_para_fora_tambem_e_recusado` — recusar `..` por texto deixa
+  passar um atalho apontando para fora da pasta: o caminho não tem `..` nenhum
+  e ainda assim escapa. Só resolver o caminho de verdade pega os dois casos.
+- `sem_barramento_o_agente_nao_consegue_gravar` (ao vivo) — se este passar a
+  criar o arquivo, a aprovação virou enfeite.
 
 Um teste que passou merece um comentário no código quando o motivo dele não é
 óbvio. Dois exemplos já no repositório: o `overflow` do nó, que tornava a porta
@@ -501,6 +528,66 @@ A CLI cobrou **US$ 0,0496**. A nossa tabela, que não sabe de cache, diria
 painel nenhum, porque some a confiança em todos os outros números da tela.
 
 A tabela segue valendo para adaptador que não reporta custo. Hoje, o falso.
+
+### `--permission-prompt-tool` não existe mais
+
+O `ARQUITETURA.md` e o plano do M2 que este arquivo trazia diziam que a
+aprovação sairia por `--permission-prompt-tool` apontando para o servidor MCP
+do app. **Essa flag não existe na CLI 2.1.251** — não está no `--help`, e
+`grep -c permission-prompt` devolve zero.
+
+O que existe, e é melhor, é um **hook `PreToolUse` do tipo `http`**: antes de
+rodar uma ferramenta, a CLI faz POST do pedido para uma URL e a resposta
+decide. Medido antes de projetar em cima:
+
+| O que eu precisava saber | O que a medição mostrou |
+|---|---|
+| O hook recebe o quê? | `tool_name`, `tool_input` (com o conteúdo inteiro que seria gravado), `tool_use_id`, `cwd`, `session_id` |
+| O cabeçalho com o token chega? | Chega intacto |
+| Negar impede mesmo? | Impede — o arquivo não foi criado |
+| A CLI espera a resposta? | Espera. Segurar oito segundos fez o agente esperar oito segundos |
+
+A última linha é a que sustenta o marco. Sem ela o card seria teatro: o
+arquivo seria gravado e desfeito. Com ela, ele não chega a ser gravado.
+
+O formato da resposta:
+
+```json
+{ "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow" | "deny",
+    "permissionDecisionReason": "…" } }
+```
+
+`permissionDecisionReason` vai para o **modelo**, não para a tela. Por isso o
+texto de recusa diz "não tente de novo por outro caminho": sem isso, um agente
+prestativo tenta gravar por outra ferramenta. Medido ao vivo — a resposta dele
+depois de um "não" foi *"não vou tentar contornar o bloqueio por outro
+caminho"*.
+
+### Escrever passa só pelo hook
+
+`Write` e `Edit` **não** estão no `--allowedTools`. A única porta para gravar é
+o hook: se ele deixar de disparar por qualquer motivo — versão nova da CLI,
+arquivo de settings corrompido, barramento fora do ar — a gravação é recusada
+em vez de passar batida. O teste ao vivo
+`sem_barramento_o_agente_nao_consegue_gravar` existe para essa trava não
+enferrujar.
+
+`--restricted` continua ligado, e `--tools` nomeia de volta o `Bash` que ele
+tiraria: sem execução de código não há como montar um `.xlsx`, e cada uso de
+`Bash` passa pelo card com o comando à vista.
+
+### "Não perguntar de novo" não vale para tudo
+
+A caixa aparece para `Write`, `Edit` e `NotebookEdit`. Para `Bash` e
+`WebFetch`, não: uma licença permanente para rodar comando valeria pela máquina
+inteira, concedida num clique que ninguém lembra uma semana depois. O card diz
+"isto pergunta sempre" em vez de só esconder a caixa — o usuário precisa
+entender que não é esquecimento.
+
+A regra é por (workspace, ferramenta) — "gravar nesta pasta" —, nunca por
+arquivo. Regra por arquivo vira uma lista que ninguém audita.
 
 ### Somente leitura até o M2
 
@@ -644,34 +731,45 @@ pronto do `ARQUITETURA.md`.
 - **M0** — *arrasto três caixas, fecho o app, reabro e está tudo no lugar.*
   Funciona.
 - **M1** — *peço "resuma este PDF" e vejo a resposta chegando em bolhas, com o
-  custo ao lado.* Funciona, contra o Claude Code de verdade. Medido em
-  `nucleo/tests/ao_vivo.rs`.
+  custo ao lado.* Funciona, contra o Claude Code de verdade.
+- **M2** — *o agente monta um arquivo na minha pasta e eu aprovo a gravação
+  antes de acontecer.* Funciona. Medido em `nucleo/tests/ao_vivo.rs`: o card
+  aparece, o arquivo **não existe** enquanto ele está aberto, e passa a existir
+  depois do clique.
 
-### O que ficou de fora do M1, com intenção
+### O que ficou de fora do M2, com intenção
 
-1. **Escrita.** O agente lê e não grava, porque o card de aprovação é do M2.
-   Trocar isso é acrescentar ferramentas ao allowlist em `claude.rs` — não
-   faça antes da aprovação existir.
+1. **As ferramentas de trabalho do §6.** `ler_nota`, `escrever_nota`,
+   `listar_arquivos` e companhia ainda não existem como ferramentas MCP: o
+   agente usa as nativas do Claude Code (`Read`, `Write`), que já ficam
+   confinadas à pasta. O barramento está de pé e com escopo por token — falta
+   pendurar as ferramentas nele, e isso anda junto com o `enviar_para` do M3.
 2. **Face terminal com histórico.** Ela mostra o fluxo cru a partir do turno
-   seguinte, porque o fluxo não é gravado — só o que ele produz. Guardar exige
-   tabela nova; é decisão, não esquecimento.
+   seguinte, porque o fluxo não é gravado — só o que ele produz.
 3. **Modelo por papel.** O adaptador não passa `--model`: segue o que a CLI do
-   usuário estiver configurada para usar. Escolher modelo por papel é do M4,
-   quando papel existir.
-4. **Texto intermediário no histórico.** Ver §9.
+   usuário estiver configurada para usar. É do M4, quando papel existir.
+4. **Ensaios e Git oculto.** São do M5. A pasta do workspace é uma pasta comum,
+   ainda sem repositório por baixo.
+5. **Escolher a pasta do workspace pela interface.** Ela nasce em
+   `Documentos/Mutirão/<nome>`. Um seletor de pasta exige o plugin de diálogo
+   do Tauri; é uma tela, não uma decisão de arquitetura.
 
-### Começando o M2
+### Começando o M3
 
-O M2 é *"o agente monta um `.xlsx` na minha pasta e eu aprovo a gravação antes
-de acontecer"*. A ordem que o M1 deixa pronta:
+O M3 é *"Pesquisador entrega ao Redator sem eu tocar, e um ciclo A→B→A encerra
+sozinho sem travar o app"*. O que o M2 deixa pronto:
 
-1. Subir o servidor MCP do app com o token da §4 — a sessão já nasce com um,
-   guardado e nunca exposto ao front.
-2. Passar `--permission-prompt-tool` e trocar `--strict-mcp-config` pelo
-   `--mcp-config` com o nosso servidor, em `claude.rs`.
-3. Ligar `aguardando_aprovacao` na máquina de estados (a transição já existe e
-   já tem teste) ao card de aprovação da §7.
-4. Só então acrescentar as ferramentas de escrita ao allowlist.
+1. O barramento já sobe, já resolve token → sessão → nó e já segura uma
+   chamada até alguém responder. `enviar_para` é o mesmo mecanismo com outro
+   destinatário: em vez de esperar um humano, espera outro nó.
+2. `EstadoSessao::AguardandoNo` já existe na máquina de estados, com teste.
+3. `message.trace_id` e `message.origem_node` já estão no esquema desde a 001 —
+   a cadeia entre nós tem onde ser gravada sem migration nenhuma.
+
+O que precisa nascer: as ferramentas MCP do §6 penduradas no barramento
+(`--mcp-config` em vez de `--strict-mcp-config` sozinho), a fila de um turno
+por nó, e os três limites que impedem o ciclo infinito — 6 saltos, prazo por
+mensagem e orçamento de tokens por trace.
 
 Escreva um roteiro novo para o adaptador falso no mesmo dia — é ele que mantém
 o custo de cada iteração em zero.

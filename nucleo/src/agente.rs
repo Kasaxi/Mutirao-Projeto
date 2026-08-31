@@ -27,10 +27,14 @@ pub struct ContextoSessao {
     /// Id de retomada devolvido pelo agente numa sessão anterior. `Some` quer
     /// dizer "continue aquela conversa", não "comece outra".
     pub sessao_externa_id: Option<String>,
-    /// Segredo que o servidor MCP usa para descobrir qual nó está chamando.
-    /// Vai para a configuração MCP do processo do agente e para lugar nenhum
+    /// Segredo que o barramento usa para descobrir qual nó está chamando.
+    /// Vai para a configuração do processo do agente e para lugar nenhum
     /// mais — ver `ESPECIFICACAO.md §4`.
     pub token: String,
+    /// Onde o agente pede licença antes de gravar. `None` desliga a aprovação
+    /// **e a escrita junto**: sem barramento no ar, o adaptador roda somente
+    /// leitura, porque escrever sem quem aprove é o que a §8 proíbe.
+    pub url_aprovacao: Option<String>,
 }
 
 pub trait AgenteAdapter: Send {

@@ -41,11 +41,76 @@ pub struct Orquestrador {
     fabrica: Arc<dyn Fabrica>,
     sink: Sink,
     vivos: Mutex<HashMap<String, SessaoViva>>,
+    aprovacoes: Arc<crate::barramento::Aprovacoes>,
+    /// Preenchido depois que o barramento sobe — ele precisa das `aprovacoes`
+    /// daqui, então nasce depois. Enquanto for `None`, as sessões rodam
+    /// somente leitura.
+    url_aprovacao: Mutex<Option<String>>,
 }
 
 impl Orquestrador {
     pub fn novo(banco: Arc<Mutex<Banco>>, fabrica: Arc<dyn Fabrica>, sink: Sink) -> Self {
-        Orquestrador { banco, fabrica, sink, vivos: Mutex::new(HashMap::new()) }
+        Orquestrador {
+            banco,
+            fabrica,
+            sink,
+            vivos: Mutex::new(HashMap::new()),
+            aprovacoes: crate::barramento::Aprovacoes::nova(),
+            url_aprovacao: Mutex::new(None),
+        }
+    }
+
+    /// Diz ao orquestrador onde o barramento subiu. Até isto acontecer, nenhum
+    /// agente pode gravar — não por precaução vaga, mas porque sem barramento
+    /// não existe quem aprove.
+    pub fn ligar_barramento(&self, url_aprovacao: impl Into<String>) {
+        if let Ok(mut u) = self.url_aprovacao.lock() {
+            *u = Some(url_aprovacao.into());
+        }
+    }
+
+    /// A mesma fila de pendências que o barramento usa. O app passa isto para
+    /// `Barramento::subir` — os dois lados precisam do mesmo mapa, senão a
+    /// decisão do usuário não chega a quem está esperando.
+    pub fn aprovacoes(&self) -> Arc<crate::barramento::Aprovacoes> {
+        self.aprovacoes.clone()
+    }
+
+    /// O usuário clicou. Grava no log de auditoria, solta o agente e avisa a
+    /// interface — nessa ordem: soltar antes de gravar deixaria o arquivo no
+    /// disco antes de a linha que o autoriza existir.
+    pub fn decidir_aprovacao(
+        &self,
+        tool_call_id: &str,
+        decisao: Decisao,
+        lembrar: bool,
+    ) -> Resultado<()> {
+        let node_id = {
+            let banco = self.banco()?;
+            let chamada = banco.obter_ferramenta(tool_call_id)?;
+            let sessao = banco.obter_sessao(&chamada.session_id)?;
+            let no = banco.obter_no(&sessao.node_id)?;
+
+            // "Não perguntar de novo" só faz sentido para o que foi aprovado.
+            // Guardar um "não" permanente esconderia a ferramenta sem o
+            // usuário nunca mais ser lembrado disso.
+            if lembrar && decisao == Decisao::Aprovada {
+                banco.conceder_regra(&no.workspace_id, &chamada.ferramenta)?;
+            }
+            banco.decidir_ferramenta(tool_call_id, decisao, "usuario")?;
+            sessao.node_id
+        };
+
+        // Só agora o agente sai do lugar.
+        self.aprovacoes.responder(tool_call_id, decisao);
+
+        (self.sink)(EventoNucleo::AprovacaoDecidida {
+            tool_call_id: tool_call_id.to_string(),
+            node_id,
+            decisao,
+            decidido_por: "usuario".to_string(),
+        });
+        Ok(())
     }
 
     /// Abre a sessão de um nó, ou devolve a que já existe. Chamado quando a
@@ -124,6 +189,11 @@ impl Orquestrador {
             viva.adaptador.cancelar();
         }
 
+        // Um card aberto segura uma requisição HTTP e, com ela, o processo do
+        // agente. Cancelar sem fechá-lo deixaria os dois pendurados até o
+        // prazo de meia hora — e o usuário achando que tinha parado.
+        self.negar_pendentes(session_id);
+
         let node_id = {
             let banco = self.banco()?;
             let sessao = banco.obter_sessao(session_id)?;
@@ -155,6 +225,27 @@ impl Orquestrador {
         }
     }
 
+    /// Fecha como negados os cards abertos de uma sessão. Sem barulho: quem
+    /// cancelou o turno já sabe o que fez.
+    fn negar_pendentes(&self, session_id: &str) {
+        let pendentes: Vec<String> = match self.banco() {
+            Ok(banco) => banco
+                .ferramentas_da_sessao(session_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|c| c.aprovacao == Aprovacao::Pendente)
+                .map(|c| c.id)
+                .collect(),
+            Err(_) => return,
+        };
+        for id in pendentes {
+            if let Ok(banco) = self.banco() {
+                let _ = banco.decidir_ferramenta(&id, Decisao::Negada, "turno cancelado");
+            }
+            self.aprovacoes.responder(&id, Decisao::Negada);
+        }
+    }
+
     // ------------------------------------------------------------- internos
 
     fn contexto(&self, sessao: &Sessao) -> Resultado<ContextoSessao> {
@@ -167,6 +258,7 @@ impl Orquestrador {
             pasta: workspace.pasta,
             sessao_externa_id: sessao.sessao_externa_id.clone(),
             token: banco.token_da_sessao(&sessao.id)?,
+            url_aprovacao: self.url_aprovacao.lock().ok().and_then(|u| u.clone()),
         })
     }
 

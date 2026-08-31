@@ -44,9 +44,21 @@ use std::time::Duration;
 /// sempre — o pior desfecho possível, e o que o teste do orquestrador cobre.
 pub const PRAZO_PADRAO: Duration = Duration::from_secs(600);
 
-/// Ferramentas liberadas no M1. Só leitura, e confinadas à pasta do workspace
-/// pelo `--restricted` mais o diretório de trabalho do processo.
-const FERRAMENTAS_M1: &[&str] = &["Read", "Glob", "Grep"];
+/// Leitura, liberada sem card. Confinada à pasta do workspace pelo
+/// `--restricted` mais o diretório de trabalho do processo.
+///
+/// Escrita **não** está aqui de propósito. A única porta para gravar é o hook
+/// de aprovação: se ele deixar de disparar por qualquer motivo, a gravação é
+/// recusada em vez de passar batida. Errar para o lado de não gravar é a
+/// escolha certa quando o assunto é o disco de outra pessoa.
+const FERRAMENTAS_SEM_CARD: &[&str] = &["Read", "Glob", "Grep"];
+
+/// O conjunto que o processo pode enxergar. Escrever e rodar comando estão
+/// aqui, mas cada uso passa pelo card — ver `barramento::FERRAMENTAS_QUE_PEDEM_LICENCA`.
+const FERRAMENTAS_DISPONIVEIS: &str = "Read,Glob,Grep,Write,Edit,NotebookEdit,Bash";
+
+/// Só leitura, para quando não há barramento no ar.
+const FERRAMENTAS_SO_LEITURA: &str = "Read,Glob,Grep";
 
 // ------------------------------------------------------------------ tradução
 
@@ -276,18 +288,28 @@ pub struct AdaptadorClaude {
     filho: Arc<Mutex<Option<Child>>>,
     cancelado: Arc<AtomicBool>,
     prazo: Duration,
+    /// O `--settings` desta sessão, com o hook de aprovação. `None` quando não
+    /// há barramento — e aí o adaptador roda somente leitura.
+    arquivo_settings: Option<std::path::PathBuf>,
 }
 
 impl AdaptadorClaude {
-    pub fn novo(binario: impl Into<String>, ctx: ContextoSessao) -> Self {
-        AdaptadorClaude {
+    pub fn novo(binario: impl Into<String>, ctx: ContextoSessao) -> Resultado<Self> {
+        let arquivo_settings = AdaptadorClaude::escrever_settings(&ctx)?;
+        Ok(AdaptadorClaude {
             binario: binario.into(),
             sessao_externa: Arc::new(Mutex::new(ctx.sessao_externa_id.clone())),
             ctx,
             filho: Arc::new(Mutex::new(None)),
             cancelado: Arc::new(AtomicBool::new(false)),
             prazo: PRAZO_PADRAO,
-        }
+            arquivo_settings,
+        })
+    }
+
+    /// A escrita está liberada nesta sessão? Falso quando não há barramento.
+    pub fn pode_escrever(&self) -> bool {
+        self.arquivo_settings.is_some()
     }
 
     /// O id de retomada que este adaptador usará no próximo turno.
@@ -310,14 +332,25 @@ impl AdaptadorClaude {
             // deixa de ser conversa.
             .arg("--include-partial-messages")
             .arg("--verbose")
-            // Tira Bash, execução de código e WebFetch; confina as ferramentas
-            // de arquivo ao diretório de trabalho; e — o que mais importa —
-            // ignora as configurações do usuário e do projeto. Sem isso o
-            // comportamento do agente dependeria do que houvesse na máquina.
+            // Confina as ferramentas de arquivo ao diretório de trabalho e —
+            // o que mais importa — ignora as configurações do usuário e do
+            // projeto. Sem isso o comportamento do agente dependeria do que
+            // houvesse em `~/.claude` de quem instalou, e o mesmo workspace se
+            // comportaria diferente em cada computador.
             .arg("--restricted")
+            // `--restricted` remove Bash e as ferramentas que rodam código,
+            // "unless --tools names them". Nomeá-las aqui devolve o poder de
+            // montar um `.xlsx`, e cada uso passa pelo card.
+            .arg("--tools")
+            .arg(if self.arquivo_settings.is_some() {
+                FERRAMENTAS_DISPONIVEIS
+            } else {
+                FERRAMENTAS_SO_LEITURA
+            })
             .arg("--allowedTools")
-            .args(FERRAMENTAS_M1)
-            // Nenhum servidor MCP até o M2. O nosso entra aqui, com o token.
+            .args(FERRAMENTAS_SEM_CARD)
+            // Nenhum servidor MCP ainda. As ferramentas de trabalho do §6
+            // entram por aqui quando existirem.
             .arg("--strict-mcp-config")
             // A pasta do workspace é o mundo do agente.
             .current_dir(&self.ctx.pasta)
@@ -327,10 +360,49 @@ impl AdaptadorClaude {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        if let Some(caminho) = &self.arquivo_settings {
+            cmd.arg("--settings").arg(caminho);
+        }
         if let Some(id) = self.sessao_externa() {
             cmd.arg("--resume").arg(id);
         }
         cmd
+    }
+
+    /// Escreve o `--settings` desta sessão: um hook `PreToolUse` do tipo HTTP
+    /// apontando para o barramento, com o token da sessão no cabeçalho.
+    ///
+    /// Em arquivo, e não como JSON na linha de comando (que `--settings`
+    /// também aceita), porque a linha de comando de um processo é legível por
+    /// qualquer outro processo do mesmo usuário — e ali dentro vai o token.
+    fn escrever_settings(ctx: &ContextoSessao) -> Resultado<Option<std::path::PathBuf>> {
+        let Some(url) = &ctx.url_aprovacao else {
+            return Ok(None);
+        };
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": crate::barramento::FERRAMENTAS_QUE_PEDEM_LICENCA.join("|"),
+                    "hooks": [{
+                        "type": "http",
+                        "url": url,
+                        "headers": { crate::barramento::CABECALHO_TOKEN: ctx.token },
+                        // Um pouco mais que o prazo do barramento: quem decide
+                        // desistir é ele, com uma resposta explicando; a CLI
+                        // desistindo antes daria um erro sem sentido para quem
+                        // estava lendo o card.
+                        "timeout": crate::barramento::PRAZO_APROVACAO.as_secs() + 60,
+                        "statusMessage": "esperando você aprovar no Mutirão",
+                    }],
+                }],
+            },
+        });
+
+        let caminho =
+            std::env::temp_dir().join(format!("mutirao-{}-settings.json", ctx.session_id));
+        std::fs::write(&caminho, serde_json::to_vec_pretty(&settings)?)?;
+        segredar(&caminho);
+        Ok(Some(caminho))
     }
 
     /// A CLI está instalada e responde? Chamado no onboarding (M6) e antes do
@@ -540,6 +612,28 @@ impl Fabrica for FabricaClaude {
         _adaptador: Adaptador,
         ctx: &ContextoSessao,
     ) -> Resultado<Box<dyn AgenteAdapter>> {
-        Ok(Box::new(AdaptadorClaude::novo(self.binario.clone(), ctx.clone())))
+        Ok(Box::new(AdaptadorClaude::novo(self.binario.clone(), ctx.clone())?))
     }
 }
+
+impl Drop for AdaptadorClaude {
+    fn drop(&mut self) {
+        // O arquivo de settings carrega o token. Deixá-lo no temp depois que a
+        // sessão morreu é deixar um segredo válido para ninguém, mas legível
+        // por qualquer coisa.
+        if let Some(caminho) = &self.arquivo_settings {
+            let _ = std::fs::remove_file(caminho);
+        }
+    }
+}
+
+/// Restringe o arquivo ao dono. No Windows o temp já é por usuário; no Unix,
+/// sem isto, qualquer conta na máquina lê o token.
+#[cfg(unix)]
+fn segredar(caminho: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(caminho, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn segredar(_caminho: &std::path::Path) {}

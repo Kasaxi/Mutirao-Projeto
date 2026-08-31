@@ -381,7 +381,7 @@ export default function App() {
       <header className="barra">
         <div className="marca">
           Mutirão
-          <span className="versao">M1</span>
+          <span className="versao">M2</span>
         </div>
 
         <div className="ferramentas">

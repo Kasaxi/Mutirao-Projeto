@@ -8,6 +8,8 @@
 //! O shell (`src-tauri`) é uma casca fina por cima disto.
 
 pub mod agente;
+pub mod arquivos;
+pub mod barramento;
 pub mod claude;
 pub mod db;
 pub mod erro;
@@ -15,6 +17,8 @@ pub mod modelo;
 pub mod orquestrador;
 
 pub use agente::{AdaptadorFalso, AgenteAdapter, ContextoSessao, Fabrica, FabricaFalsa, Roteiro};
+pub use arquivos::ItemArquivo;
+pub use barramento::{Aprovacoes, Barramento};
 pub use claude::{AdaptadorClaude, FabricaClaude};
 pub use db::Banco;
 pub use erro::{Erro, Resultado};
@@ -33,7 +37,7 @@ mod testes {
 
     /// Quantas migrations existem hoje. Ao somar uma, este número sobe junto —
     /// é o lembrete de que o esquema mudou e o teste de baixo cobre a subida.
-    const VERSAO_ESQUEMA: i64 = 2;
+    const VERSAO_ESQUEMA: i64 = 3;
 
     #[test]
     fn migration_aplica_e_e_idempotente() {
@@ -901,6 +905,474 @@ mod testes {
             }
             outro => panic!("esperava erro explicativo, veio {outro:?}"),
         }
+    }
+
+    // ================================================================ M2 ===
+    // Aprovação. O agente fica literalmente parado — segurando a resposta HTTP
+    // do hook — enquanto o card espera um clique. É isso que torna o card
+    // honesto: o arquivo não é gravado e desfeito, ele não chega a ser gravado.
+
+    use crate::barramento::{tratar, Aprovacoes, Veredito};
+
+    struct Balcao {
+        banco: Arc<Mutex<Banco>>,
+        orq: Orquestrador,
+        aprovacoes: Arc<Aprovacoes>,
+        sink: Sink,
+        token: String,
+        sessao_id: String,
+        workspace_id: String,
+        avisos: Arc<Mutex<Vec<EventoNucleo>>>,
+    }
+
+    fn balcao() -> Balcao {
+        let banco = Banco::em_memoria().unwrap();
+        let ws = banco.criar_workspace("Obra", "/tmp/obra-m2").unwrap();
+        let no = banco.criar_no(&ws.id, TipoNo::Agente, "Redator", 0.0, 0.0).unwrap();
+        let sessao = banco.criar_sessao(&no.id, Adaptador::Falso).unwrap();
+        let token = banco.token_da_sessao(&sessao.id).unwrap();
+        // O turno precisa estar em andamento: aprovação só existe dentro de um.
+        banco.mudar_estado_sessao(&sessao.id, EstadoSessao::Pensando).unwrap();
+        let banco = Arc::new(Mutex::new(banco));
+
+        let avisos: Arc<Mutex<Vec<EventoNucleo>>> = Arc::new(Mutex::new(Vec::new()));
+        let copia = avisos.clone();
+        let sink: Sink = Arc::new(move |e| copia.lock().unwrap().push(e));
+
+        let orq = Orquestrador::novo(
+            banco.clone(),
+            Arc::new(FabricaFalsa::demonstracao()),
+            sink.clone(),
+        );
+        Balcao {
+            aprovacoes: orq.aprovacoes(),
+            banco,
+            orq,
+            sink,
+            token,
+            sessao_id: sessao.id,
+            workspace_id: ws.id,
+            avisos,
+        }
+    }
+
+    impl Balcao {
+        fn corpo(&self, ferramenta: &str, argumentos: serde_json::Value) -> String {
+            serde_json::json!({
+                "tool_name": ferramenta,
+                "tool_input": argumentos,
+                "tool_use_id": "toolu_teste",
+            })
+            .to_string()
+        }
+
+        fn id_da_chamada(&self) -> String {
+            format!("{}:toolu_teste", self.sessao_id)
+        }
+
+        /// Dispara o pedido numa thread — ele bloqueia até alguém decidir.
+        fn pedir(&self, corpo: String, prazo: Duration) -> std::thread::JoinHandle<Veredito> {
+            let banco = self.banco.clone();
+            let apr = self.aprovacoes.clone();
+            let sink = self.sink.clone();
+            let token = self.token.clone();
+            std::thread::spawn(move || {
+                tratar(&banco, &apr, &sink, &token, &corpo, prazo).expect("pedido válido")
+            })
+        }
+
+        fn esperar_card(&self) -> bool {
+            for _ in 0..400 {
+                if self.aprovacoes.quantas_esperando() == 1 {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            false
+        }
+
+        fn eventos(&self) -> Vec<EventoNucleo> {
+            self.avisos.lock().unwrap().clone()
+        }
+    }
+
+    #[test]
+    fn token_invalido_nao_conta_nada_a_quem_perguntou() {
+        // "Esse nó não existe", nunca "existe mas você não pode" — §4.
+        let b = balcao();
+        let corpo = b.corpo("Write", serde_json::json!({"file_path": "x", "content": "y"}));
+        let r = tratar(
+            &b.banco,
+            &b.aprovacoes,
+            &b.sink,
+            "token-que-nao-existe",
+            &corpo,
+            Duration::from_millis(50),
+        );
+        match r {
+            Err(Erro::NaoEncontrado { id, .. }) => {
+                assert_eq!(id, "token", "o token não pode aparecer na mensagem de erro");
+            }
+            outro => panic!("esperava recusa, veio {outro:?}"),
+        }
+        // E sem token nenhum, também não.
+        assert!(tratar(
+            &b.banco,
+            &b.aprovacoes,
+            &b.sink,
+            "",
+            &corpo,
+            Duration::from_millis(50)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn ler_nao_pede_licenca() {
+        // Um card por arquivo aberto viraria ruído, e card que vira ruído é
+        // card que o usuário aprova sem ler.
+        let b = balcao();
+        let corpo = b.corpo("Read", serde_json::json!({"file_path": "contrato.docx"}));
+        let v = tratar(
+            &b.banco,
+            &b.aprovacoes,
+            &b.sink,
+            &b.token,
+            &corpo,
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        assert!(v.permitir);
+        assert_eq!(b.aprovacoes.quantas_esperando(), 0);
+        assert!(b.eventos().is_empty(), "leitura não devia acender card nenhum");
+    }
+
+    #[test]
+    fn gravacao_espera_o_humano_e_so_entao_libera() {
+        let b = balcao();
+        let corpo = b.corpo(
+            "Write",
+            serde_json::json!({"file_path": "/tmp/obra-m2/orçamento.xlsx", "content": "a\nb\nc"}),
+        );
+        let pedido = b.pedir(corpo, Duration::from_secs(30));
+
+        assert!(b.esperar_card(), "o pedido devia estar esperando alguém");
+
+        // O nó pede atenção e a linha de auditoria já existe, pendente.
+        let chamada = b.banco.lock().unwrap().obter_ferramenta(&b.id_da_chamada()).unwrap();
+        assert_eq!(chamada.aprovacao, Aprovacao::Pendente);
+        assert_eq!(
+            b.banco.lock().unwrap().obter_sessao(&b.sessao_id).unwrap().estado,
+            EstadoSessao::AguardandoAprovacao
+        );
+
+        // O card chegou à interface com o texto mastigado.
+        let pedido_ui = b.eventos().into_iter().find_map(|e| match e {
+            EventoNucleo::AprovacaoPedida { pedido } => Some(pedido),
+            _ => None,
+        });
+        let p = pedido_ui.expect("faltou aprovacao:pedida");
+        assert_eq!(p.resumo, "Gravar orçamento.xlsx");
+        assert!(p.detalhe.contains("3 linhas"), "detalhe: {}", p.detalhe);
+        assert_eq!(p.previa.as_deref(), Some("a\nb\nc"));
+
+        b.orq.decidir_aprovacao(&b.id_da_chamada(), Decisao::Aprovada, false).unwrap();
+
+        let v = pedido.join().unwrap();
+        assert!(v.permitir, "motivo: {}", v.motivo);
+
+        let chamada = b.banco.lock().unwrap().obter_ferramenta(&b.id_da_chamada()).unwrap();
+        assert_eq!(chamada.aprovacao, Aprovacao::Aprovada);
+        assert_eq!(chamada.decidido_por.as_deref(), Some("usuario"));
+        assert_eq!(
+            b.banco.lock().unwrap().obter_sessao(&b.sessao_id).unwrap().estado,
+            EstadoSessao::Pensando,
+            "decidido o card, o turno continua"
+        );
+    }
+
+    #[test]
+    fn negar_bloqueia_e_explica_ao_agente_para_ele_nao_insistir() {
+        let b = balcao();
+        let corpo = b.corpo("Write", serde_json::json!({"file_path": "x.txt", "content": "y"}));
+        let pedido = b.pedir(corpo, Duration::from_secs(30));
+        assert!(b.esperar_card());
+
+        b.orq.decidir_aprovacao(&b.id_da_chamada(), Decisao::Negada, false).unwrap();
+        let v = pedido.join().unwrap();
+
+        assert!(!v.permitir);
+        // A mensagem vai para o modelo. Sem dizer "não tente por outro
+        // caminho", um agente prestativo tenta gravar via outra ferramenta.
+        assert!(v.motivo.contains("Negado"), "motivo: {}", v.motivo);
+        assert!(v.motivo.to_lowercase().contains("não tente"), "motivo: {}", v.motivo);
+
+        let chamada = b.banco.lock().unwrap().obter_ferramenta(&b.id_da_chamada()).unwrap();
+        assert_eq!(chamada.aprovacao, Aprovacao::Negada);
+    }
+
+    #[test]
+    fn nao_perguntar_de_novo_dispensa_o_card_na_proxima() {
+        let b = balcao();
+        let corpo = b.corpo("Write", serde_json::json!({"file_path": "a.txt", "content": "1"}));
+        let pedido = b.pedir(corpo, Duration::from_secs(30));
+        assert!(b.esperar_card());
+        b.orq.decidir_aprovacao(&b.id_da_chamada(), Decisao::Aprovada, true).unwrap();
+        assert!(pedido.join().unwrap().permitir);
+
+        // Segunda gravação: não pode parar em card nenhum.
+        let corpo2 = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {"file_path": "b.txt", "content": "2"},
+            "tool_use_id": "toolu_outro",
+        })
+        .to_string();
+        let v = tratar(
+            &b.banco,
+            &b.aprovacoes,
+            &b.sink,
+            &b.token,
+            &corpo2,
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        assert!(v.permitir, "a regra devia ter decidido sozinha");
+
+        // E o log de auditoria diz que quem decidiu foi a regra, não o usuário.
+        let chamada = b
+            .banco
+            .lock()
+            .unwrap()
+            .obter_ferramenta(&format!("{}:toolu_outro", b.sessao_id))
+            .unwrap();
+        assert_eq!(chamada.decidido_por.as_deref(), Some("regra:Write"));
+        assert_eq!(b.banco.lock().unwrap().listar_regras(&b.workspace_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rodar_comando_nunca_vira_permissao_permanente() {
+        // Liberar Bash de uma vez seria entregar a máquina num clique que
+        // ninguém lembra uma semana depois.
+        let b = balcao();
+        let r = b.banco.lock().unwrap().conceder_regra(&b.workspace_id, "Bash");
+        match r {
+            Err(Erro::Invalido(m)) => assert!(m.contains("máquina"), "mensagem: {m}"),
+            outro => panic!("esperava recusa, veio {outro:?}"),
+        }
+        assert!(b.banco.lock().unwrap().conceder_regra(&b.workspace_id, "Write").is_ok());
+    }
+
+    #[test]
+    fn regra_concedida_e_revogavel_e_conceder_duas_vezes_nao_duplica() {
+        let b = balcao();
+        let banco = b.banco.lock().unwrap();
+        let r1 = banco.conceder_regra(&b.workspace_id, "Write").unwrap();
+        let r2 = banco.conceder_regra(&b.workspace_id, "Write").unwrap();
+        assert_eq!(r1.id, r2.id, "revogar precisa apagar tudo, não a metade");
+        assert_eq!(banco.listar_regras(&b.workspace_id).unwrap().len(), 1);
+        banco.revogar_regra(&r1.id).unwrap();
+        assert!(banco.listar_regras(&b.workspace_id).unwrap().is_empty());
+        assert!(banco.regra_para(&b.workspace_id, "Write").unwrap().is_none());
+    }
+
+    #[test]
+    fn card_que_ninguem_responde_acaba_negado_e_nao_pendurado() {
+        // Um pedido esperando para sempre deixa o processo do agente de pé e o
+        // nó travado sem explicação.
+        let b = balcao();
+        let corpo = b.corpo("Write", serde_json::json!({"file_path": "x", "content": "y"}));
+        let v = tratar(
+            &b.banco,
+            &b.aprovacoes,
+            &b.sink,
+            &b.token,
+            &corpo,
+            Duration::from_millis(120),
+        )
+        .unwrap();
+        assert!(!v.permitir);
+        let chamada = b.banco.lock().unwrap().obter_ferramenta(&b.id_da_chamada()).unwrap();
+        assert_eq!(chamada.aprovacao, Aprovacao::Negada);
+        assert_eq!(chamada.decidido_por.as_deref(), Some("prazo"));
+        assert_eq!(b.aprovacoes.quantas_esperando(), 0, "não pode sobrar canal órfão");
+    }
+
+    #[test]
+    fn decidir_duas_vezes_o_mesmo_card_nao_passa() {
+        let b = balcao();
+        let corpo = b.corpo("Write", serde_json::json!({"file_path": "x", "content": "y"}));
+        let pedido = b.pedir(corpo, Duration::from_secs(30));
+        assert!(b.esperar_card());
+        b.orq.decidir_aprovacao(&b.id_da_chamada(), Decisao::Aprovada, false).unwrap();
+        pedido.join().unwrap();
+        // O segundo clique não pode reabrir uma decisão já tomada.
+        assert!(b
+            .orq
+            .decidir_aprovacao(&b.id_da_chamada(), Decisao::Negada, false)
+            .is_err());
+    }
+
+    #[test]
+    fn o_veredito_sai_no_formato_que_a_cli_espera() {
+        // Formato medido na CLI 2.1.251, não deduzido: um `permissionDecision`
+        // com outro nome faz a CLI ignorar a resposta e perguntar ao vazio.
+        let v = Veredito { permitir: false, motivo: "não".into() };
+        let j = v.como_json();
+        assert_eq!(j["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(j["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(j["hookSpecificOutput"]["permissionDecisionReason"], "não");
+        let sim = Veredito { permitir: true, motivo: "ok".into() };
+        assert_eq!(sim.como_json()["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
+    #[test]
+    fn o_card_descreve_a_acao_em_portugues_de_gente() {
+        let (r, d) = descrever_ferramenta(
+            "Write",
+            &serde_json::json!({"file_path": "/a/b/orçamento.xlsx", "content": "x\ny"}),
+        );
+        assert_eq!(r, "Gravar orçamento.xlsx");
+        assert!(d.starts_with("2 linhas"), "detalhe: {d}");
+
+        let (r, d) = descrever_ferramenta("Bash", &serde_json::json!({"command": "rm -rf /"}));
+        assert_eq!(r, "Rodar um comando");
+        assert_eq!(d, "rm -rf /", "o comando inteiro precisa aparecer antes do clique");
+
+        // Ferramenta nova: mostrar o nome cru é melhor que inventar um verbo
+        // errado para algo que o usuário está prestes a autorizar.
+        let (r, _) = descrever_ferramenta("FerramentaQueNaoExiste", &serde_json::json!({}));
+        assert_eq!(r, "Usar FerramentaQueNaoExiste");
+    }
+
+    #[test]
+    fn o_barramento_sobe_em_porta_propria_e_so_no_localhost() {
+        let b = balcao();
+        let barramento =
+            Barramento::subir(b.banco.clone(), b.aprovacoes.clone(), b.sink.clone()).unwrap();
+        assert!(barramento.porta() > 0);
+        assert!(barramento.url_de_aprovacao().starts_with("http://127.0.0.1:"));
+        // Porta escolhida pelo sistema: duas cópias do app não brigam, e não
+        // existe alvo previsível para quem estiver na mesma máquina.
+        let outro =
+            Barramento::subir(b.banco.clone(), b.aprovacoes.clone(), b.sink.clone()).unwrap();
+        assert_ne!(barramento.porta(), outro.porta());
+    }
+
+    // ---- escopo de arquivos ----------------------------------------------
+    //
+    // "Qualquer caminho que escape da pasta é negado antes de chegar ao disco"
+    // — ARQUITETURA.md §8. Esta é a fronteira que separa "o agente trabalha na
+    // minha pasta" de "o agente tem a minha máquina".
+
+    use crate::arquivos::{arquivo_da_nota, dentro_do_escopo, escrever_texto, ler_texto, listar};
+
+    struct Pasta(std::path::PathBuf);
+
+    impl Pasta {
+        fn nova() -> Pasta {
+            let p = std::env::temp_dir().join(format!("mutirao-escopo-{}", novo_id()));
+            std::fs::create_dir_all(&p).unwrap();
+            Pasta(p)
+        }
+    }
+
+    impl Drop for Pasta {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn caminho_que_sai_da_pasta_e_recusado() {
+        let p = Pasta::nova();
+        for fuga in [
+            "../fora.txt",
+            "a/../../fora.txt",
+            "/etc/passwd",
+            "sub/../../fora.txt",
+        ] {
+            assert!(
+                matches!(dentro_do_escopo(&p.0, fuga), Err(Erro::ForaDoEscopo)),
+                "deixou passar: {fuga}"
+            );
+        }
+        // E o caminho honesto continua passando.
+        assert!(dentro_do_escopo(&p.0, "contratos/minuta.docx").is_ok());
+        assert!(dentro_do_escopo(&p.0, "./nota.md").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_simbolico_para_fora_tambem_e_recusado() {
+        // Este é o caso que uma checagem de texto deixa passar: o caminho não
+        // tem `..` nenhum e mesmo assim sai da pasta. Só resolver o caminho de
+        // verdade pega.
+        let p = Pasta::nova();
+        let fora = std::env::temp_dir().join(format!("mutirao-fora-{}", novo_id()));
+        std::fs::create_dir_all(&fora).unwrap();
+        std::fs::write(fora.join("segredo.txt"), "não deveria dar para ler").unwrap();
+        std::os::unix::fs::symlink(&fora, p.0.join("atalho")).unwrap();
+
+        assert!(matches!(
+            dentro_do_escopo(&p.0, "atalho/segredo.txt"),
+            Err(Erro::ForaDoEscopo)
+        ));
+        assert!(ler_texto(&p.0, "atalho/segredo.txt").is_err());
+        let _ = std::fs::remove_dir_all(&fora);
+    }
+
+    #[test]
+    fn grava_e_le_dentro_da_pasta_criando_subpasta() {
+        let p = Pasta::nova();
+        // Arquivo que ainda não existe: o escopo se resolve pelo ancestral que
+        // existe, senão não daria para criar nada.
+        escrever_texto(&p.0, "notas/briefing.md", "# Briefing\n").unwrap();
+        assert_eq!(ler_texto(&p.0, "notas/briefing.md").unwrap(), "# Briefing\n");
+        assert!(p.0.join("notas").join("briefing.md").exists());
+    }
+
+    #[test]
+    fn listar_esconde_o_que_comeca_com_ponto_e_poe_pasta_primeiro() {
+        let p = Pasta::nova();
+        std::fs::create_dir_all(p.0.join("contratos")).unwrap();
+        std::fs::create_dir_all(p.0.join(".mutirao")).unwrap();
+        std::fs::write(p.0.join("anexo.pdf"), "x").unwrap();
+        std::fs::write(p.0.join("Ata.docx"), "yy").unwrap();
+
+        let itens = listar(&p.0, "").unwrap();
+        let nomes: Vec<&str> = itens.iter().map(|i| i.nome.as_str()).collect();
+        // O Git oculto do §3 não aparece: o usuário vê "Rascunho 2", nunca
+        // `.mutirao`.
+        assert_eq!(nomes, vec!["contratos", "anexo.pdf", "Ata.docx"], "veio {nomes:?}");
+        assert!(itens[0].pasta);
+        assert_eq!(itens.iter().find(|i| i.nome == "Ata.docx").unwrap().tamanho, 2);
+    }
+
+    #[test]
+    fn arquivo_binario_nao_finge_ser_texto() {
+        let p = Pasta::nova();
+        std::fs::write(p.0.join("imagem.png"), [0xff, 0xd8, 0xff, 0x00, 0x9c]).unwrap();
+        match ler_texto(&p.0, "imagem.png") {
+            Err(Erro::Invalido(m)) => assert!(m.contains("não é texto"), "mensagem: {m}"),
+            outro => panic!("esperava recusa, veio {outro:?}"),
+        }
+    }
+
+    #[test]
+    fn nome_de_nota_vira_arquivo_que_o_windows_aceita() {
+        assert_eq!(arquivo_da_nota("Briefing"), "Briefing.md");
+        assert_eq!(arquivo_da_nota("Ata da reunião"), "Ata da reunião.md");
+        // Estes o Windows recusa em nome de arquivo; virar traço é melhor que
+        // falhar na hora de gravar.
+        assert_eq!(arquivo_da_nota("a/b:c*d?"), "a-b-c-d-.md");
+        assert_eq!(arquivo_da_nota("   "), "nota.md");
+        // Ponto nas pontas some: um nó chamado ".oculto" não pode virar um
+        // arquivo que o usuário não enxerga na própria pasta.
+        assert_eq!(arquivo_da_nota("../fuga"), "-fuga.md");
+        assert_eq!(arquivo_da_nota(".oculto"), "oculto.md");
+        // E o resultado sempre fica dentro do escopo.
+        let p = Pasta::nova();
+        assert!(dentro_do_escopo(&p.0, &arquivo_da_nota("../fuga")).is_ok());
     }
 
     #[test]

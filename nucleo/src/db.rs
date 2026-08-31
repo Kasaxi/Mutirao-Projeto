@@ -9,6 +9,7 @@ use std::path::Path;
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_inicial.sql"),
     include_str!("../migrations/002_adaptador_falso.sql"),
+    include_str!("../migrations/003_regras_de_aprovacao.sql"),
 ];
 
 pub struct Banco {
@@ -257,6 +258,19 @@ impl Banco {
         let n = self.conn.execute(
             "UPDATE node SET x = ?2, y = ?3, w = ?4, h = ?5, alterado_em = ?6 WHERE id = ?1",
             params![id, x, y, w, h, agora()],
+        )?;
+        if n == 0 {
+            return Err(Erro::nao_encontrado("nó", id));
+        }
+        Ok(())
+    }
+
+    /// Guarda o payload específico do tipo. É onde a nota lembra em qual
+    /// arquivo ela mora — sem isso, renomear o nó órfãozaria o `.md` no disco.
+    pub fn definir_config_no(&self, id: &str, config: &serde_json::Value) -> Resultado<()> {
+        let n = self.conn.execute(
+            "UPDATE node SET config_json = ?2, alterado_em = ?3 WHERE id = ?1",
+            params![id, config.to_string(), agora()],
         )?;
         if n == 0 {
             return Err(Erro::nao_encontrado("nó", id));
@@ -594,11 +608,17 @@ impl Banco {
             decidido_por: None,
             criado_em: agora(),
         };
+        // O mesmo pedido chega por dois caminhos: o evento do stream (que o
+        // adaptador traduz) e o hook de aprovação (que chega pelo barramento),
+        // em ordem que não dá para garantir. Quem chegar primeiro cria a linha;
+        // o segundo não pode rebaixar uma pendente para automática — daí o
+        // ON CONFLICT dividido entre este método e `gravar_ferramenta_pendente`.
         self.conn.execute(
             "INSERT INTO tool_call (id, session_id, ferramenta, argumentos_json,
                                     resultado_json, erro, aprovacao, decidido_por,
                                     decidido_em, criado_em)
-             VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, NULL, ?6)",
+             VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, NULL, ?6)
+             ON CONFLICT(id) DO NOTHING",
             params![c.id, c.session_id, c.ferramenta, c.argumentos.to_string(),
                     c.aprovacao.como_texto(), c.criado_em],
         )?;
@@ -619,6 +639,170 @@ impl Banco {
         )?;
         if n == 0 {
             return Err(Erro::nao_encontrado("chamada de ferramenta", id));
+        }
+        Ok(())
+    }
+
+    /// Resolve o segredo do MCP para a sessão que o carrega.
+    ///
+    /// É o coração do escopo do `ESPECIFICACAO.md §4`: token → sessão → nó.
+    /// Um token que não resolve não recebe "existe mas você não pode" — recebe
+    /// nada, e quem chamou não descobre se o token existia.
+    pub fn sessao_por_token(&self, token: &str) -> Resultado<Sessao> {
+        let mut st = self.conn.prepare(
+            "SELECT id, node_id, adaptador, sessao_externa_id, estado, custo_total,
+                    iniciada_em, ultimo_sinal_em
+             FROM session WHERE token = ?1",
+        )?;
+        st.query_row(params![token], le_sessao).map_err(|e| match e {
+            // Nunca ecoa o token na mensagem: ele vai para log e log vaza.
+            rusqlite::Error::QueryReturnedNoRows => Erro::nao_encontrado("sessão", "token"),
+            outro => Erro::Banco(outro),
+        })
+    }
+
+    /// Registra o pedido e o deixa esperando gente.
+    ///
+    /// Ao contrário de `gravar_ferramenta_pedida`, este **sobrepõe** o que já
+    /// estiver lá: se o evento do stream chegou antes e gravou "automatica", a
+    /// verdade é que o hook está segurando o agente, e é essa que vale.
+    pub fn gravar_ferramenta_pendente(
+        &self,
+        session_id: &str,
+        id_externo: &str,
+        ferramenta: &str,
+        argumentos: &serde_json::Value,
+    ) -> Resultado<ChamadaFerramenta> {
+        let c = ChamadaFerramenta {
+            id: format!("{session_id}:{id_externo}"),
+            session_id: session_id.to_string(),
+            ferramenta: ferramenta.to_string(),
+            argumentos: argumentos.clone(),
+            resultado: None,
+            erro: None,
+            aprovacao: Aprovacao::Pendente,
+            decidido_por: None,
+            criado_em: agora(),
+        };
+        self.conn.execute(
+            "INSERT INTO tool_call (id, session_id, ferramenta, argumentos_json,
+                                    resultado_json, erro, aprovacao, decidido_por,
+                                    decidido_em, criado_em)
+             VALUES (?1, ?2, ?3, ?4, NULL, NULL, 'pendente', NULL, NULL, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                 aprovacao = 'pendente',
+                 argumentos_json = excluded.argumentos_json",
+            params![c.id, c.session_id, c.ferramenta, c.argumentos.to_string(), c.criado_em],
+        )?;
+        Ok(c)
+    }
+
+    /// Fecha um pedido de aprovação. `decidido_por` é `usuario` ou
+    /// `regra:<ferramenta>`, e vai para o log de auditoria junto com a hora.
+    pub fn decidir_ferramenta(
+        &self,
+        tool_call_id: &str,
+        decisao: Decisao,
+        decidido_por: &str,
+    ) -> Resultado<()> {
+        let aprovacao = match decisao {
+            Decisao::Aprovada => Aprovacao::Aprovada,
+            Decisao::Negada => Aprovacao::Negada,
+        };
+        let n = self.conn.execute(
+            "UPDATE tool_call SET aprovacao = ?2, decidido_por = ?3, decidido_em = ?4
+             WHERE id = ?1 AND aprovacao = 'pendente'",
+            params![tool_call_id, aprovacao.como_texto(), decidido_por, agora()],
+        )?;
+        if n == 0 {
+            // Ou não existe, ou já foi decidido. Os dois casos são a mesma
+            // coisa para quem chamou: não há o que decidir agora.
+            return Err(Erro::nao_encontrado("aprovação pendente", tool_call_id));
+        }
+        Ok(())
+    }
+
+    pub fn obter_ferramenta(&self, id: &str) -> Resultado<ChamadaFerramenta> {
+        let mut st = self.conn.prepare(
+            "SELECT id, session_id, ferramenta, argumentos_json, resultado_json, erro,
+                    aprovacao, decidido_por, criado_em
+             FROM tool_call WHERE id = ?1",
+        )?;
+        st.query_row(params![id], le_ferramenta).map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => {
+                Erro::nao_encontrado("chamada de ferramenta", id)
+            }
+            outro => Erro::Banco(outro),
+        })
+    }
+
+    // ------------------------------------------------------------- regras
+
+    /// Concede "não perguntar de novo" para uma ferramenta neste workspace.
+    /// Conceder duas vezes não cria duas linhas — revogar precisa apagar tudo.
+    pub fn conceder_regra(
+        &self,
+        workspace_id: &str,
+        ferramenta: &str,
+    ) -> Resultado<RegraAprovacao> {
+        // Rodar comando e buscar na web nunca viram permanentes. "Não
+        // perguntar de novo" para gravar nesta pasta é uma decisão sobre uma
+        // pasta; para `Bash` seria uma decisão sobre a máquina inteira, tomada
+        // uma vez com um clique e esquecida no dia seguinte.
+        if !crate::barramento::FERRAMENTAS_QUE_ACEITAM_REGRA.contains(&ferramenta) {
+            return Err(Erro::invalido(format!(
+                "{ferramenta} pergunta sempre: uma licença permanente para isso \
+                 valeria pela máquina toda, não só por esta pasta"
+            )));
+        }
+        self.obter_workspace(workspace_id)?;
+        if let Some(ja) = self.regra_para(workspace_id, ferramenta)? {
+            return Ok(ja);
+        }
+        let r = RegraAprovacao {
+            id: novo_id(),
+            workspace_id: workspace_id.to_string(),
+            ferramenta: ferramenta.to_string(),
+            criado_em: agora(),
+        };
+        self.conn.execute(
+            "INSERT INTO regra_aprovacao (id, workspace_id, ferramenta, criado_em)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![r.id, r.workspace_id, r.ferramenta, r.criado_em],
+        )?;
+        Ok(r)
+    }
+
+    pub fn regra_para(
+        &self,
+        workspace_id: &str,
+        ferramenta: &str,
+    ) -> Resultado<Option<RegraAprovacao>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, workspace_id, ferramenta, criado_em
+             FROM regra_aprovacao WHERE workspace_id = ?1 AND ferramenta = ?2",
+        )?;
+        match st.query_row(params![workspace_id, ferramenta], le_regra) {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(Erro::Banco(e)),
+        }
+    }
+
+    pub fn listar_regras(&self, workspace_id: &str) -> Resultado<Vec<RegraAprovacao>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, workspace_id, ferramenta, criado_em
+             FROM regra_aprovacao WHERE workspace_id = ?1 ORDER BY criado_em ASC",
+        )?;
+        let linhas = st.query_map(params![workspace_id], le_regra)?;
+        Ok(linhas.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Toda permissão concedida precisa ser revogável — `ARQUITETURA.md §8`.
+    pub fn revogar_regra(&self, id: &str) -> Resultado<()> {
+        let n = self.conn.execute("DELETE FROM regra_aprovacao WHERE id = ?1", params![id])?;
+        if n == 0 {
+            return Err(Erro::nao_encontrado("regra", id));
         }
         Ok(())
     }
@@ -737,6 +921,15 @@ fn le_ferramenta(r: &Row) -> rusqlite::Result<ChamadaFerramenta> {
         aprovacao: Aprovacao::do_texto(&aprovacao).unwrap_or(Aprovacao::Automatica),
         decidido_por: r.get(7)?,
         criado_em: r.get(8)?,
+    })
+}
+
+fn le_regra(r: &Row) -> rusqlite::Result<RegraAprovacao> {
+    Ok(RegraAprovacao {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        ferramenta: r.get(2)?,
+        criado_em: r.get(3)?,
     })
 }
 

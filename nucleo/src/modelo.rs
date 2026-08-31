@@ -485,10 +485,116 @@ pub enum EventoNucleo {
         total: f64,
         por_no: Vec<CustoDoNo>,
     },
+    /// Uma ferramenta parou à espera de gente. O nó está em
+    /// `aguardando_aprovacao` e o agente, literalmente parado, segurando a
+    /// resposta HTTP do hook até alguém clicar.
+    AprovacaoPedida {
+        pedido: PedidoAprovacao,
+    },
+    AprovacaoDecidida {
+        tool_call_id: String,
+        node_id: String,
+        decisao: Decisao,
+        /// `usuario` ou `regra:<ferramenta>`. Quem decidiu importa tanto
+        /// quanto o que foi decidido.
+        decidido_por: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CustoDoNo {
     pub node_id: String,
     pub custo: f64,
+}
+
+// -------------------------------------------------------------- aprovação
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Decisao {
+    Aprovada,
+    Negada,
+}
+
+/// Uma permissão concedida com "não perguntar de novo".
+///
+/// Escopo (workspace, ferramenta) — "gravar nesta pasta", não "gravar neste
+/// arquivo". Regra por arquivo vira lista que ninguém audita.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RegraAprovacao {
+    pub id: String,
+    pub workspace_id: String,
+    pub ferramenta: String,
+    pub criado_em: Instante,
+}
+
+impl RegraAprovacao {
+    /// O que gravar em `tool_call.decidido_por` quando esta regra decide.
+    /// O formato `regra:<nome>` é o do `ESPECIFICACAO.md §7`.
+    pub fn assinatura(&self) -> String {
+        format!("regra:{}", self.ferramenta)
+    }
+}
+
+/// O que a interface precisa para desenhar o card de aprovação.
+///
+/// Traz `resumo` e `detalhe` já mastigados porque quem sabe traduzir
+/// "Write com file_path=orçamento.xlsx" para "Gravar orçamento.xlsx" é o
+/// núcleo, não o front — e assim os dois adaptadores contam a mesma história.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PedidoAprovacao {
+    pub tool_call_id: String,
+    pub session_id: String,
+    pub node_id: String,
+    pub ferramenta: String,
+    /// Uma linha: "Gravar orçamento.xlsx".
+    pub resumo: String,
+    /// A segunda linha: "14 linhas · 2,3 kB", ou o comando que vai rodar.
+    pub detalhe: String,
+    /// Prévia do conteúdo, encolhida. `None` quando a ferramenta não escreve.
+    pub previa: Option<String>,
+    pub criado_em: Instante,
+}
+
+/// Descreve um pedido de ferramenta em português de gente.
+///
+/// Os nomes vêm do Claude Code (`Write`, `Edit`, `Bash`…). Quando aparecer um
+/// desconhecido, mostrar o nome cru é melhor que inventar um verbo errado — o
+/// usuário está prestes a autorizar isso.
+pub fn descrever_ferramenta(ferramenta: &str, argumentos: &serde_json::Value) -> (String, String) {
+    let campo = |c: &str| argumentos.get(c).and_then(|v| v.as_str()).unwrap_or("");
+    let arquivo = |c: &str| {
+        let bruto = campo(c);
+        bruto.rsplit(['/', '\\']).next().unwrap_or(bruto).to_string()
+    };
+
+    match ferramenta {
+        "Write" => {
+            let conteudo = campo("content");
+            (
+                format!("Gravar {}", arquivo("file_path")),
+                format!("{} linhas · {}", conteudo.lines().count(), tamanho(conteudo.len())),
+            )
+        }
+        "Edit" | "NotebookEdit" => (
+            format!("Alterar {}", arquivo("file_path")),
+            "trecho substituído no arquivo".to_string(),
+        ),
+        "Bash" => (
+            "Rodar um comando".to_string(),
+            campo("command").chars().take(120).collect(),
+        ),
+        outro => (
+            format!("Usar {outro}"),
+            argumentos.to_string().chars().take(120).collect(),
+        ),
+    }
+}
+
+fn tamanho(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else {
+        format!("{:.1} kB", bytes as f64 / 1024.0)
+    }
 }

@@ -1,10 +1,10 @@
-// Teste de fumaça da interface, M0 e M1.
+// Teste de fumaça da interface, M0 a M2.
 //
 // Roda o front construído (modo navegador, com o núcleo falso) num Chromium
 // e exercita as interações que definem cada marco: mover, ampliar, arrastar e
 // ligar nós (M0); pedir alguma coisa a um agente e ver a resposta chegando em
-// bolhas, com o custo ao lado (M1). Não substitui teste do Tauri — verifica a
-// interface.
+// bolhas, com o custo ao lado (M1); e aprovar uma gravação antes de ela
+// acontecer (M2). Não substitui teste do Tauri — verifica a interface.
 //
 //   node testes-ui/fumaca.mjs
 
@@ -193,6 +193,46 @@ await pagina.waitForSelector(".no-agente .card-acao", { timeout: 5000 });
 const card = await agente.locator(".card-acao").first().innerText();
 conferir("ação vira card com o alvo legível", card.includes("contrato-v3.docx"), card.trim());
 
+// ============================================================== M2 =========
+// "o agente monta um arquivo na minha pasta e eu aprovo a gravação antes de
+// acontecer". O turno PARA no card — não é um aviso, é um bloqueio.
+
+console.log("\nM2 — aprovação");
+
+await pagina.waitForSelector(".no-agente .card-aprovacao", { timeout: 8000 });
+const licenca = agente.locator(".card-aprovacao");
+conferir(
+  "gravação para o turno num card",
+  (await licenca.locator(".aprovacao-resumo").innerText()).includes("resumo-do-contrato.md"),
+  await licenca.locator(".aprovacao-resumo").innerText(),
+);
+conferir(
+  "o card diz o tamanho do que vai ser gravado",
+  /linhas/.test(await licenca.locator(".aprovacao-detalhe").innerText()),
+);
+conferir("o nó pede atenção enquanto espera", (await agente.locator(".sinal.atencao").count()) === 1);
+conferir("o campo continua bloqueado com card aberto", await campo.isDisabled());
+
+// dá para ver o conteúdo antes de decidir
+await licenca.getByRole("button", { name: "ver o que muda" }).click();
+conferir(
+  "dá para ler o conteúdo antes de aprovar",
+  (await licenca.locator(".aprovacao-previa").innerText()).includes("Cláusula de reajuste"),
+);
+
+// a caixa "não perguntar de novo" aparece para gravação
+conferir(
+  "oferece não perguntar de novo para gravar",
+  (await licenca.locator(".aprovacao-lembrar input").count()) === 1,
+);
+
+// Retrato do M2: o card aberto, com o turno parado atrás dele.
+await pagina.screenshot({ path: "testes-ui/aprovacao.png" });
+
+await licenca.getByRole("button", { name: "aprovar" }).click();
+await pagina.waitForTimeout(150);
+conferir("o card some depois do clique", (await agente.locator(".card-aprovacao").count()) === 0);
+
 // 16. o turno termina sozinho e devolve o campo
 await pagina.waitForFunction(
   () => {
@@ -237,7 +277,97 @@ conferir(
 const sistema = await agente.locator(".aviso-sistema").last().innerText();
 conferir("a conversa registra quem parou", sistema.includes("interrompido"), sistema.trim());
 
-// 21. e nada explodiu durante tudo isso
+// 21. negar bloqueia, e a ação fica marcada como falha na conversa
+await campo.fill("tente gravar de novo");
+await campo.press("Enter");
+await pagina.waitForSelector(".no-agente .card-aprovacao", { timeout: 8000 });
+await agente.locator(".card-aprovacao").getByRole("button", { name: "negar" }).click();
+await pagina.waitForFunction(
+  () => {
+    const c = document.querySelector(".no-agente .conversa-campo");
+    return c instanceof HTMLTextAreaElement && !c.disabled;
+  },
+  { timeout: 10000 },
+);
+conferir(
+  "negar marca a ação como falha",
+  (await agente.locator(".card-acao.falhou").count()) >= 1,
+);
+
+// 22. "não perguntar de novo" dispensa o card na vez seguinte
+await campo.fill("grave mais uma vez");
+await campo.press("Enter");
+await pagina.waitForSelector(".no-agente .card-aprovacao", { timeout: 8000 });
+await agente.locator(".card-aprovacao .aprovacao-lembrar input").check();
+await agente.locator(".card-aprovacao").getByRole("button", { name: "aprovar" }).click();
+await pagina.waitForFunction(
+  () => {
+    const c = document.querySelector(".no-agente .conversa-campo");
+    return c instanceof HTMLTextAreaElement && !c.disabled;
+  },
+  { timeout: 10000 },
+);
+
+await campo.fill("e de novo");
+await campo.press("Enter");
+// Agora o turno tem de ir até o fim sem parar em card nenhum.
+await pagina.waitForFunction(
+  () => {
+    const c = document.querySelector(".no-agente .conversa-campo");
+    const card = document.querySelector(".no-agente .card-aprovacao");
+    return c instanceof HTMLTextAreaElement && !c.disabled && !card;
+  },
+  { timeout: 12000 },
+);
+conferir("depois da regra, a gravação não pede card de novo", true);
+
+// ---- substrato: nota em arquivo e árvore de verdade ----------------------
+
+console.log("\nM2 — substrato");
+
+const TEXTO_DA_NOTA = "# Ata\n\nPrazo confirmado: 18 meses.";
+const nota = pagina.locator(".no-nota").first();
+const campoNota = nota.locator(".nota-campo");
+await campoNota.click();
+await campoNota.fill(TEXTO_DA_NOTA);
+await pagina.waitForTimeout(900); // o debounce de gravação
+conferir(
+  "a nota diz em qual arquivo ela mora",
+  /\.md$/.test(await nota.locator(".nota-arquivo").innerText()),
+  await nota.locator(".nota-arquivo").innerText(),
+);
+
+const arvore = pagina.locator(".no-arquivos").first();
+await arvore.locator(".arvore-item").first().waitFor({ timeout: 3000 });
+
+// A nota gravou de verdade? A árvore é quem sabe: ela lê a pasta, não o
+// estado do React. (Recarregar a página não serviria de prova aqui — o modo
+// navegador guarda tudo em memória e some junto com a página, de propósito.)
+await arvore.getByText("reler").click();
+await pagina.waitForTimeout(200);
+const linhaDaNota = arvore.locator(".arvore-item", { hasText: "Briefing.md" });
+conferir(
+  "o que foi escrito na nota chegou ao arquivo",
+  (await linhaDaNota.locator(".arvore-tamanho").innerText()) === `${TEXTO_DA_NOTA.length} B`,
+  await linhaDaNota.locator(".arvore-tamanho").innerText(),
+);
+
+await arvore.locator(".arvore-item").first().waitFor({ timeout: 3000 });
+const primeiros = await arvore.locator(".arvore-nome").allInnerTexts();
+conferir("a árvore lista a pasta com pastas primeiro", primeiros[0] === "contratos", primeiros.join(", "));
+
+await arvore.getByText("contratos").click();
+await pagina.waitForTimeout(200);
+const dentro = await arvore.locator(".arvore-nome").allInnerTexts();
+conferir("dá para entrar numa subpasta", dentro.includes("minuta.docx"), dentro.join(", "));
+await arvore.locator(".arvore-caminho .aba").first().click();
+await pagina.waitForTimeout(200);
+conferir(
+  "e voltar",
+  (await arvore.locator(".arvore-nome").allInnerTexts())[0] === "contratos",
+);
+
+// 23. e nada explodiu durante tudo isso
 conferir("console limpo depois do turno", erros.length === 0, erros.slice(0, 2).join(" | "));
 
 // Retrato do estado limpo, não do canvas remexido pelos testes acima.

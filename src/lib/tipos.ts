@@ -176,6 +176,68 @@ export interface EventoCusto {
   por_no: CustoDoNo[];
 }
 
+// -------------------------------------------------------------- arquivos
+
+export interface ItemArquivo {
+  /** Relativo à pasta do workspace, sempre com `/`, mesmo no Windows. */
+  caminho: string;
+  nome: string;
+  pasta: boolean;
+  tamanho: number;
+}
+
+export interface Nota {
+  arquivo: string;
+  conteudo: string;
+}
+
+// ------------------------------------------------------------- aprovação
+
+export type Decisao = "aprovada" | "negada";
+
+export interface RegraAprovacao {
+  id: string;
+  workspace_id: string;
+  ferramenta: string;
+  criado_em: number;
+}
+
+/** O que o card de aprovação mostra. Vem mastigado do núcleo. */
+export interface PedidoAprovacao {
+  tool_call_id: string;
+  session_id: string;
+  node_id: string;
+  ferramenta: string;
+  resumo: string;
+  detalhe: string;
+  previa: string | null;
+  criado_em: number;
+}
+
+export interface EventoAprovacaoPedida {
+  tipo: "aprovacao_pedida";
+  pedido: PedidoAprovacao;
+}
+
+export interface EventoAprovacaoDecidida {
+  tipo: "aprovacao_decidida";
+  tool_call_id: string;
+  node_id: string;
+  decisao: Decisao;
+  decidido_por: string;
+}
+
+/**
+ * Destas o usuário pode dizer "não perguntar de novo nesta pasta". Espelha
+ * `barramento::FERRAMENTAS_QUE_ACEITAM_REGRA` — liberar `Bash` de uma vez
+ * seria entregar a máquina num clique que ninguém lembra depois.
+ */
+export const FERRAMENTAS_QUE_ACEITAM_REGRA = ["Write", "Edit", "NotebookEdit"];
+
+export function aceitaRegra(ferramenta: string): boolean {
+  return FERRAMENTAS_QUE_ACEITAM_REGRA.includes(ferramenta);
+}
+
 export const ROTULO_ESTADO: Record<EstadoSessao, string> = {
   ocioso: "pronto",
   pensando: "pensando",

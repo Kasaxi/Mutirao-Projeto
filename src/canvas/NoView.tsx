@@ -6,7 +6,9 @@ import {
   type EstadoSessao,
   type No,
 } from "../lib/tipos";
+import { Arquivos } from "./Arquivos";
 import { Conversa } from "./Conversa";
+import { Nota } from "./Nota";
 
 interface Props {
   no: No;
@@ -148,23 +150,9 @@ function Corpo({
     case "agente":
       return <Conversa no={no} aoMudarEstado={aoMudarEstadoSessao} />;
     case "nota":
-      return (
-        <div className="maquete nota">
-          <p># Briefing</p>
-          <p className="fraco">Memória compartilhada entre os agentes ligados.</p>
-          <span className="marco">Markdown no disco · M2</span>
-        </div>
-      );
+      return <Nota no={no} />;
     case "arquivos":
-      return (
-        <div className="maquete arvore">
-          <p>📁 contratos/</p>
-          <p className="recuo">📄 minuta.docx</p>
-          <p className="recuo">📄 anexo-i.pdf</p>
-          <p>📁 planilhas/</p>
-          <span className="marco">Árvore real · M2</span>
-        </div>
-      );
+      return <Arquivos no={no} />;
     case "portal":
       return (
         <div className="maquete portal">

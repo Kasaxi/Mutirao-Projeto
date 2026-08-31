@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { escutar, ipc } from "../lib/ipc";
 import {
+  aceitaRegra,
   ehErroIpc,
   formatarCusto,
   ROTULO_ESTADO,
   type ChamadaFerramenta,
+  type Decisao,
   type EstadoSessao,
   type EventoAgente,
+  type EventoAprovacaoDecidida,
+  type EventoAprovacaoPedida,
   type EventoEstado,
   type EventoSessao,
   type Mensagem,
   type No,
+  type PedidoAprovacao,
   type Sessao,
 } from "../lib/tipos";
 
@@ -45,6 +50,9 @@ export function Conversa({ no, aoMudarEstado }: Props) {
   const [erro, setErro] = useState<string | null>(null);
   const [cru, setCru] = useState(false);
   const [eventosCrus, setEventosCrus] = useState<string[]>([]);
+  // Cards abertos. Enquanto houver um, o agente está literalmente parado
+  // esperando — não é um aviso, é um bloqueio.
+  const [pedidos, setPedidos] = useState<PedidoAprovacao[]>([]);
 
   const fim = useRef<HTMLDivElement>(null);
   // Espelho do texto que vai chegando. O fim do turno precisa lê-lo na hora,
@@ -68,13 +76,18 @@ export function Conversa({ no, aoMudarEstado }: Props) {
         setSessao(s);
         setEstado(s.estado);
         setCusto(s.custo_total);
-        const [h, a] = await Promise.all([
+        const [h, a, p] = await Promise.all([
           ipc.historico(s.id),
           ipc.acoesDaSessao(s.id),
+          // Cards que já estavam abertos. Sem isto, um evento perdido — o nó
+          // fora da tela quando ele chegou — deixaria o agente parado
+          // esperando por um card que ninguém vê.
+          ipc.aprovacoesPendentes(s.id),
         ]);
         if (!vivo) return;
         setMensagens(h);
         setAcoes(a);
+        setPedidos(p);
       } catch (e) {
         if (vivo) setErro(mensagemDeErro(e));
       }
@@ -134,6 +147,18 @@ export function Conversa({ no, aoMudarEstado }: Props) {
       if (p.session_id !== idSessao) return;
       setEstado(p.estado);
       if (p.estado !== "pensando") setPensamento("");
+    }).then(registrar);
+
+    escutar<EventoAprovacaoPedida>("aprovacao:pedida", (p) => {
+      if (p.pedido.session_id !== idSessao) return;
+      // Nunca duplica: o mesmo pedido pode chegar de novo se o nó remontar.
+      setPedidos((v) =>
+        v.some((x) => x.tool_call_id === p.pedido.tool_call_id) ? v : [...v, p.pedido],
+      );
+    }).then(registrar);
+
+    escutar<EventoAprovacaoDecidida>("aprovacao:decidida", (p) => {
+      setPedidos((v) => v.filter((x) => x.tool_call_id !== p.tool_call_id));
     }).then(registrar);
 
     /** Mensagem montada a partir do evento, sem passar pelo banco. */
@@ -284,6 +309,20 @@ export function Conversa({ no, aoMudarEstado }: Props) {
     }
   }, [rascunho, sessao, recarregar]);
 
+  const decidir = useCallback(
+    async (pedido: PedidoAprovacao, decisao: Decisao, lembrar: boolean) => {
+      // Some da tela no ato: o clique já aconteceu, e um card que continua
+      // ali dá a impressão de que não funcionou.
+      setPedidos((v) => v.filter((x) => x.tool_call_id !== pedido.tool_call_id));
+      try {
+        await ipc.decidirAprovacao(pedido.tool_call_id, decisao, lembrar);
+      } catch (e) {
+        setErro(mensagemDeErro(e));
+      }
+    },
+    [],
+  );
+
   const parar = useCallback(async () => {
     if (!sessao) return;
     try {
@@ -357,6 +396,13 @@ export function Conversa({ no, aoMudarEstado }: Props) {
           <div ref={fim} />
         </div>
       )}
+
+      {/* Fora da lista de propósito: dentro dela, rolar a conversa esconderia
+          os botões de aprovar e negar, que são a única razão de o card existir.
+          Aqui ele fica ancorado logo acima do campo, sempre alcançável. */}
+      {pedidos.map((p) => (
+        <CardAprovacao key={p.tool_call_id} pedido={p} aoDecidir={decidir} />
+      ))}
 
       <div className="conversa-rodape">
         <textarea
@@ -459,14 +505,92 @@ function CardAcao({ acao }: { acao: ChamadaFerramenta }) {
 }
 
 const VERBOS: Record<string, string> = {
-  ler_arquivo: "leu",
-  escrever_arquivo: "gravou",
-  listar_arquivos: "listou",
+  // Ferramentas do Claude Code, que é o que o adaptador de verdade emite.
+  // Sem estas linhas o card mostrava "Read" e "Write" crus para o usuário.
+  Read: "leu",
+  Write: "gravou",
+  Edit: "alterou",
+  NotebookEdit: "alterou",
+  Glob: "procurou",
+  Grep: "procurou por",
+  Bash: "rodou",
+  WebFetch: "buscou",
+  // Ferramentas do barramento do Mutirão (§6), que chegam no M3.
   ler_nota: "leu a nota",
   escrever_nota: "escreveu na nota",
   enviar_para: "perguntou a",
   avisar: "avisou",
 };
+
+/**
+ * O card do `ESPECIFICACAO.md §7`. Enquanto ele está na tela, o agente está
+ * parado — a chamada dele fica segurada no barramento até alguém clicar.
+ */
+function CardAprovacao({
+  pedido,
+  aoDecidir,
+}: {
+  pedido: PedidoAprovacao;
+  aoDecidir: (p: PedidoAprovacao, d: Decisao, lembrar: boolean) => void;
+}) {
+  const [lembrar, setLembrar] = useState(false);
+  const [verPrevia, setVerPrevia] = useState(false);
+  const podeLembrar = aceitaRegra(pedido.ferramenta);
+
+  return (
+    <div className="card-aprovacao" role="alertdialog" aria-label="Precisa da sua aprovação">
+      <div className="aprovacao-titulo">precisa da sua aprovação</div>
+      <div className="aprovacao-resumo">{pedido.resumo}</div>
+      <div className="aprovacao-detalhe">{pedido.detalhe}</div>
+
+      {pedido.previa && verPrevia && <pre className="aprovacao-previa">{pedido.previa}</pre>}
+
+      {podeLembrar ? (
+        <label className="aprovacao-lembrar">
+          <input
+            type="checkbox"
+            checked={lembrar}
+            onChange={(e) => setLembrar(e.target.checked)}
+          />
+          não perguntar de novo para {VERBOS[pedido.ferramenta] ?? pedido.ferramenta} nesta pasta
+        </label>
+      ) : (
+        // Bash e WebFetch perguntam sempre. Dizer isso é melhor que só não
+        // mostrar a caixa: o usuário entende que não é esquecimento.
+        <div className="aprovacao-lembrar fraco">isto pergunta sempre</div>
+      )}
+
+      {/* Por último e grudado no fundo: num nó pequeno, o que rola para fora
+          é o texto, nunca os dois botões que decidem a coisa. */}
+      <div className="aprovacao-botoes">
+        {pedido.previa && (
+          <button
+            className="conversa-botao"
+            type="button"
+            onClick={() => setVerPrevia((v) => !v)}
+          >
+            {verPrevia ? "esconder" : "ver o que muda"}
+          </button>
+        )}
+        <span className="espaco" />
+        <button
+          className="conversa-botao negar"
+          type="button"
+          onClick={() => aoDecidir(pedido, "negada", false)}
+        >
+          negar
+        </button>
+        <button
+          className="conversa-botao aprovar"
+          type="button"
+          onClick={() => aoDecidir(pedido, "aprovada", lembrar)}
+        >
+          aprovar
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function verbo(ferramenta: string): string {
   return VERBOS[ferramenta] ?? ferramenta;

@@ -8,8 +8,8 @@ mod estado;
 
 use estado::EstadoApp;
 use nucleo::{
-    Adaptador, AdaptadorClaude, Banco, EventoNucleo, Fabrica, FabricaClaude, FabricaFalsa,
-    Orquestrador, Sink,
+    Adaptador, AdaptadorClaude, Banco, Barramento, EventoNucleo, Fabrica, FabricaClaude,
+    FabricaFalsa, Orquestrador, Sink,
 };
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
@@ -39,7 +39,26 @@ fn main() {
             let (fabrica, adaptador, detalhe) = escolher_adaptador();
             println!("[mutirao] adaptador: {} — {detalhe}", adaptador.como_texto());
 
-            let orquestrador = Arc::new(Orquestrador::novo(banco.clone(), fabrica, sink));
+            let orquestrador = Arc::new(Orquestrador::novo(banco.clone(), fabrica, sink.clone()));
+
+            // O barramento precisa da fila de pendências do orquestrador — os
+            // dois lados têm de ver o mesmo mapa, senão o clique do usuário
+            // não chega a quem está esperando.
+            match Barramento::subir(banco.clone(), orquestrador.aprovacoes(), sink) {
+                Ok(b) => {
+                    println!("[mutirao] barramento em {}", b.url_de_aprovacao());
+                    orquestrador.ligar_barramento(b.url_de_aprovacao());
+                    // Guardado no estado do app para viver enquanto ele viver.
+                    app.manage(b);
+                }
+                Err(e) => {
+                    // Sem barramento não há quem aprove, e sem quem aprove o
+                    // adaptador roda somente leitura. Falhar aqui seria pior:
+                    // o app ainda serve para conversar e ler.
+                    eprintln!("[mutirao] barramento não subiu ({e}); as sessões vão só ler");
+                }
+            }
+
             app.manage(EstadoApp::novo(banco, orquestrador, adaptador, detalhe));
             Ok(())
         })
@@ -63,6 +82,13 @@ fn main() {
             comandos::historico,
             comandos::acoes_da_sessao,
             comandos::custo_do_workspace,
+            comandos::decidir_aprovacao,
+            comandos::listar_regras,
+            comandos::revogar_regra,
+            comandos::aprovacoes_pendentes,
+            comandos::listar_pasta,
+            comandos::ler_nota,
+            comandos::escrever_nota,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao subir o Mutirão");
@@ -109,6 +135,8 @@ fn emitir(app: &AppHandle, evento: EventoNucleo) {
         EventoNucleo::SessaoEvento { .. } => "sessao:evento",
         EventoNucleo::SessaoEstado { .. } => "sessao:estado",
         EventoNucleo::CustoAtualizado { .. } => "custo:atualizado",
+        EventoNucleo::AprovacaoPedida { .. } => "aprovacao:pedida",
+        EventoNucleo::AprovacaoDecidida { .. } => "aprovacao:decidida",
     };
     if let Err(e) = app.emit(nome, &evento) {
         // Falhar em avisar não pode derrubar o turno: a resposta já está
