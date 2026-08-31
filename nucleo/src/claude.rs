@@ -53,12 +53,22 @@ pub const PRAZO_PADRAO: Duration = Duration::from_secs(600);
 /// escolha certa quando o assunto é o disco de outra pessoa.
 const FERRAMENTAS_SEM_CARD: &[&str] = &["Read", "Glob", "Grep"];
 
-/// O conjunto que o processo pode enxergar. Escrever e rodar comando estão
-/// aqui, mas cada uso passa pelo card — ver `barramento::FERRAMENTAS_QUE_PEDEM_LICENCA`.
-const FERRAMENTAS_DISPONIVEIS: &str = "Read,Glob,Grep,Write,Edit,NotebookEdit,Bash";
-
 /// Só leitura, para quando não há barramento no ar.
 const FERRAMENTAS_SO_LEITURA: &str = "Read,Glob,Grep";
+
+/// Variáveis de ambiente que o processo do agente **não** herda.
+///
+/// Achadas medindo: rodando uma sonda de dentro de um Claude Code, a CLI
+/// aninhada reportou o `session_id` da sessão de fora. Neste contêiner o id
+/// continuou pinado mesmo com as variáveis removidas — então o que se prova
+/// aqui é a intenção, não o efeito. Vale assim mesmo: herdar identidade de
+/// sessão de quem abriu o app não é comportamento que se queira em nenhum
+/// caso, e a limpeza custa uma linha.
+const VARIAVEIS_QUE_NAO_HERDAM: &[&str] = &[
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_SESSION_ID",
+];
 
 // ------------------------------------------------------------------ tradução
 
@@ -366,12 +376,37 @@ impl AdaptadorClaude {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // O ambiente de quem abriu o Mutirão não pode virar o ambiente do
+        // agente. Se alguém rodar `npm run app` de dentro de um Claude Code —
+        // que é exatamente o que se faz ao desenvolver isto — todos os nós
+        // herdariam a sessão de fora, e um `--resume` de segundo turno cairia
+        // na conversa errada. Quem manda no id de sessão somos nós, pelo
+        // `--resume` explícito.
+        for herdada in VARIAVEIS_QUE_NAO_HERDAM {
+            cmd.env_remove(herdada);
+        }
+
         if let Some(caminho) = &self.arquivo_settings {
             cmd.arg("--settings").arg(caminho);
         }
         if let Some(caminho) = &self.arquivo_mcp {
             cmd.arg("--mcp-config").arg(caminho);
         }
+
+        if let Some(papel) = &self.ctx.papel {
+            // Em TODO turno, e não só no primeiro.
+            //
+            // Medido na 2.1.251: o prompt anexado sobrevive ao `--resume`
+            // sozinho — o turno seguinte obedece mesmo sem a flag. Passar de
+            // novo é o que faz uma EDIÇÃO do papel valer para a conversa que
+            // já existe. Sem isso, mudar o prompt de um papel não teria efeito
+            // nenhum sobre os nós que já o usam, e falharia calado.
+            cmd.arg("--append-system-prompt").arg(&papel.prompt);
+            if let Some(modelo) = &papel.modelo {
+                cmd.arg("--model").arg(modelo);
+            }
+        }
+
         if let Some(id) = self.sessao_externa() {
             cmd.arg("--resume").arg(id);
         }
@@ -381,17 +416,30 @@ impl AdaptadorClaude {
     /// O que o processo pode enxergar. `--restricted` tira tudo que não estiver
     /// aqui, e isso vale para ferramenta de MCP também — nomeá-las é o que faz
     /// a ponte existir para o modelo.
+    ///
+    /// Desde o M4 quem decide é o papel. Sem barramento no ar continua sendo
+    /// só leitura, seja qual for o papel: escrever sem quem aprove é o que a
+    /// §8 proíbe, e um papel não pode revogar isso.
     fn disponiveis(&self) -> String {
-        let base = if self.arquivo_settings.is_some() {
-            FERRAMENTAS_DISPONIVEIS
-        } else {
-            FERRAMENTAS_SO_LEITURA
-        };
-        let mut v = vec![base.to_string()];
+        if self.arquivo_settings.is_none() {
+            return FERRAMENTAS_SO_LEITURA.to_string();
+        }
+        let mut v: Vec<String> = crate::papeis::nativas_do_papel(self.ctx.papel.as_ref())
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         if self.arquivo_mcp.is_some() {
-            v.extend(nomes_mcp());
+            v.extend(self.ferramentas_mcp());
         }
         v.join(",")
+    }
+
+    /// As ferramentas do §6 deste nó, com o prefixo do servidor.
+    fn ferramentas_mcp(&self) -> Vec<String> {
+        crate::papeis::ferramentas_do_papel(self.ctx.papel.as_ref())
+            .iter()
+            .map(|f| crate::ferramentas::nome_completo(f))
+            .collect()
     }
 
     /// O que roda sem card. Leitura sempre; e, quando há barramento, as
@@ -401,7 +449,11 @@ impl AdaptadorClaude {
     fn sem_card(&self) -> Vec<String> {
         let mut v: Vec<String> = FERRAMENTAS_SEM_CARD.iter().map(|s| s.to_string()).collect();
         if self.arquivo_mcp.is_some() {
-            v.extend(nomes_mcp().into_iter().filter(|n| !crate::barramento::pede_licenca(n)));
+            v.extend(
+                self.ferramentas_mcp()
+                    .into_iter()
+                    .filter(|n| !crate::barramento::pede_licenca(n)),
+            );
         }
         v
     }
@@ -694,14 +746,6 @@ impl Drop for AdaptadorClaude {
     }
 }
 
-/// Os nomes das ferramentas do §6 como o modelo os vê.
-fn nomes_mcp() -> Vec<String> {
-    crate::ferramentas::catalogo()
-        .iter()
-        .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
-        .map(crate::ferramentas::nome_completo)
-        .collect()
-}
 
 /// Restringe o arquivo ao dono. No Windows o temp já é por usuário; no Unix,
 /// sem isto, qualquer conta na máquina lê o token.

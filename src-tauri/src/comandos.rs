@@ -362,3 +362,116 @@ pub struct CustoWorkspace {
     pub total: f64,
     pub por_no: Vec<CustoDoNo>,
 }
+
+// ================================================================== M4 =====
+// Papéis e times. A casca continua casca: cada comando é uma linha de despacho
+// para o núcleo, e a regra mora lá.
+
+#[tauri::command]
+pub fn listar_papeis(estado: State<EstadoApp>) -> ResultadoIpc<Vec<Papel>> {
+    Ok(estado.banco()?.listar_papeis()?)
+}
+
+#[tauri::command]
+pub fn criar_papel(
+    estado: State<EstadoApp>,
+    nome: String,
+    prompt: String,
+    ferramentas: Vec<String>,
+    autonomia: Autonomia,
+    modelo: Option<String>,
+) -> ResultadoIpc<Papel> {
+    Ok(estado.banco()?.criar_papel(
+        &nome,
+        &prompt,
+        &ferramentas,
+        autonomia,
+        modelo.as_deref(),
+        // Só o app cria embutido. Um papel feito pela pessoa é dela, e
+        // portanto apagável.
+        false,
+    )?)
+}
+
+#[tauri::command]
+pub fn editar_papel(
+    estado: State<EstadoApp>,
+    id: String,
+    prompt: String,
+    ferramentas: Vec<String>,
+    autonomia: Autonomia,
+    modelo: Option<String>,
+) -> ResultadoIpc<Papel> {
+    Ok(estado.banco()?.editar_papel(
+        &id,
+        &prompt,
+        &ferramentas,
+        autonomia,
+        modelo.as_deref(),
+    )?)
+}
+
+#[tauri::command]
+pub fn remover_papel(estado: State<EstadoApp>, id: String) -> ResultadoIpc<()> {
+    Ok(estado.banco()?.remover_papel(&id)?)
+}
+
+/// Quantos nós usam este papel. O front mostra antes de apagar, para o clique
+/// não ser às cegas.
+#[tauri::command]
+pub fn quantos_usam_o_papel(estado: State<EstadoApp>, id: String) -> ResultadoIpc<usize> {
+    Ok(estado.banco()?.quantos_usam_o_papel(&id)?)
+}
+
+/// `role_id` nulo tira o papel do nó, e é assim de propósito: um nó pode voltar
+/// a ser um agente sem papel, que é o que ele era antes do M4.
+#[tauri::command]
+pub fn definir_papel_do_no(
+    estado: State<EstadoApp>,
+    node_id: String,
+    role_id: Option<String>,
+) -> ResultadoIpc<No> {
+    let banco = estado.banco()?;
+    banco.definir_papel_do_no(&node_id, role_id.as_deref())?;
+    Ok(banco.obter_no(&node_id)?)
+}
+
+// ------------------------------------------------------------------ times
+
+#[tauri::command]
+pub fn salvar_time(
+    estado: State<EstadoApp>,
+    workspace_id: String,
+    nome: String,
+) -> ResultadoIpc<Partitura> {
+    let banco = estado.banco()?;
+    let snapshot = nucleo::partituras::fotografar(&banco, &workspace_id)?;
+    Ok(banco.salvar_partitura(&workspace_id, &nome, &snapshot)?)
+}
+
+#[tauri::command]
+pub fn listar_times(
+    estado: State<EstadoApp>,
+    workspace_id: String,
+) -> ResultadoIpc<Vec<Partitura>> {
+    Ok(estado.banco()?.listar_partituras(&workspace_id)?)
+}
+
+/// Abre um time salvo **no workspace pedido**, que não é necessariamente o de
+/// onde ele foi salvo: é isso que faz uma partitura ser reutilizável em vez de
+/// um botão de desfazer.
+#[tauri::command]
+pub fn abrir_time(
+    estado: State<EstadoApp>,
+    workspace_id: String,
+    partitura_id: String,
+) -> ResultadoIpc<Vec<No>> {
+    let banco = estado.banco()?;
+    let partitura = banco.obter_partitura(&partitura_id)?;
+    Ok(nucleo::partituras::montar(&banco, &workspace_id, &partitura)?)
+}
+
+#[tauri::command]
+pub fn remover_time(estado: State<EstadoApp>, id: String) -> ResultadoIpc<()> {
+    Ok(estado.banco()?.remover_partitura(&id)?)
+}

@@ -101,6 +101,12 @@ pub struct No {
     pub z: i64,
     /// Payload específico do tipo. Validado na borda, opaco para o banco.
     pub config: serde_json::Value,
+    /// Papel deste agente. `None` = agente sem papel, que é como todo nó
+    /// nasceu até o M4: prompt padrão da CLI e o conjunto completo de
+    /// ferramentas que o barramento oferece.
+    pub role_id: Option<String>,
+    /// Quem recrutou este nó. `None` = foi uma pessoa que o criou.
+    pub recrutado_por: Option<String>,
     pub criado_em: Instante,
     pub alterado_em: Instante,
 }
@@ -517,6 +523,16 @@ pub enum EventoNucleo {
         node_id: String,
         motivo: String,
     },
+    /// O canvas mudou por fora da interface — hoje só quando um agente recruta
+    /// outro. O front relê o workspace ao ver isto.
+    ///
+    /// Evento avisa, não carrega: mandar o canvas inteiro por evento seria a
+    /// mangueira de bombeiro que a §3 proíbe. `motivo` é para o log e para a
+    /// barra, não para o front decidir o que fazer.
+    CanvasMudou {
+        workspace_id: String,
+        motivo: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -604,6 +620,133 @@ pub enum TipoMensagem {
 pub enum Decisao {
     Aprovada,
     Negada,
+}
+
+// ============================================================ M4: papéis ===
+
+/// Quanto o papel pode fazer sozinho.
+///
+/// **A autonomia escolhe o conjunto de ferramentas, nunca se o card aparece.**
+/// Essa distinção é o `ARQUITETURA.md §8` inteiro: um nível que dispensasse a
+/// aprovação seria o "pular todas as permissões" que a §8 proíbe, com outro
+/// nome. Um papel `Solto` grava com card, igual a um `Padrao`; ele só alcança
+/// mais coisa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Autonomia {
+    /// Lê, conversa e pergunta. Não grava, não roda comando.
+    Cauteloso,
+    /// Grava nota e arquivo — cada gravação passa pelo card.
+    Padrao,
+    /// Mais o `Bash`, que pede card **sempre**: liberar comando de uma vez por
+    /// todas seria entregar a máquina num clique que ninguém lembra depois.
+    Solto,
+}
+
+impl Autonomia {
+    pub fn como_texto(&self) -> &'static str {
+        match self {
+            Autonomia::Cauteloso => "cauteloso",
+            Autonomia::Padrao => "padrao",
+            Autonomia::Solto => "solto",
+        }
+    }
+
+    pub fn do_texto(s: &str) -> Option<Autonomia> {
+        Some(match s {
+            "cauteloso" => Autonomia::Cauteloso,
+            "padrao" => Autonomia::Padrao,
+            "solto" => Autonomia::Solto,
+            _ => return None,
+        })
+    }
+}
+
+/// Papel = prompt de sistema + ferramentas + autonomia (+ modelo, se quiser).
+///
+/// É o que transforma "um agente" em "o Revisor". Sem papel, dois nós lado a
+/// lado são o mesmo programa com nomes diferentes — e um time de quatro iguais
+/// não é um time, é uma repetição.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Papel {
+    pub id: String,
+    pub nome: String,
+    /// Vai para o `--append-system-prompt` da CLI em **todo** turno. Medido na
+    /// 2.1.251: ele sobrevive ao `--resume` sozinho, mas passar de novo é o
+    /// que faz uma edição de papel valer para a conversa que já existe.
+    pub prompt: String,
+    /// Ferramentas do §6 que este papel enxerga, sem o prefixo do servidor.
+    /// Vazio = o que a autonomia der.
+    pub ferramentas: Vec<String>,
+    pub autonomia: Autonomia,
+    /// `None` = o que a CLI do usuário estiver configurada para usar.
+    pub modelo: Option<String>,
+    /// Veio com o app. Não dá para apagar — o usuário duplica e edita a cópia.
+    pub embutido: bool,
+    pub criado_em: Instante,
+}
+
+/// Teto de nós que uma cadeia pode recrutar.
+///
+/// O `ARQUITETURA.md §6` limita a conversa entre nós, não a criação deles: os
+/// três limites do M3 incidem sobre saltos, prazo e gasto de uma cadeia, e
+/// nenhum deles impede um Maestro de recrutar cem agentes num turno só. Este é
+/// o limite que faltava, e ele existe pelo mesmo motivo dos outros — o pior
+/// desfecho não é travar, é não travar.
+pub const MAX_RECRUTAS_POR_CADEIA: usize = 6;
+
+/// Teto de nós de agente por workspace, contando os que a pessoa criou.
+///
+/// Serve ao caso que o limite por cadeia não cobre: um Maestro que recruta
+/// três hoje, três amanhã e três depois. Vinte é folgado para trabalho de
+/// verdade e apertado o bastante para um laço não passar despercebido.
+pub const MAX_AGENTES_POR_WORKSPACE: usize = 20;
+
+/// Um time salvo para reabrir amanhã.
+///
+/// Guarda **layout e papéis**, não conversas: partitura é a planta do time, não
+/// um backup dele. Reabrir monta os mesmos nós com os mesmos papéis e cabos,
+/// prontos para trabalhar de novo — não ressuscita o que já foi dito.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Partitura {
+    pub id: String,
+    pub workspace_id: String,
+    pub nome: String,
+    pub snapshot: Snapshot,
+    pub criado_em: Instante,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Snapshot {
+    pub nos: Vec<NoSalvo>,
+    pub cabos: Vec<CaboSalvo>,
+}
+
+/// Um nó dentro de uma partitura.
+///
+/// Sem id: o id de um nó pertence ao canvas onde ele vive, e reabrir uma
+/// partitura cria nós **novos**. Guardar o id antigo convidaria a "restaurar
+/// por cima", que é backup — e partitura não é backup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NoSalvo {
+    pub tipo: TipoNo,
+    pub nome: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub config: serde_json::Value,
+    /// Papel pelo **nome**, não pelo id: uma partitura precisa poder abrir
+    /// noutra máquina, onde o mesmo papel tem outro id.
+    pub papel: Option<String>,
+}
+
+/// Cabo dentro de uma partitura, pelos índices em [`Snapshot::nos`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct CaboSalvo {
+    pub de: usize,
+    pub para: usize,
+    pub tipo: TipoCabo,
 }
 
 /// Uma permissão concedida com "não perguntar de novo".

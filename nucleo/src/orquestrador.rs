@@ -74,6 +74,9 @@ pub struct Orquestrador {
     /// Perguntas ao humano abertas, por sessão. A resposta é a próxima
     /// mensagem que o usuário mandar àquele nó.
     perguntas: Mutex<HashMap<String, Sender<String>>>,
+    /// Quantos agentes cada cadeia já recrutou. É o quinto limite, e ele
+    /// existe pelo mesmo motivo dos outros quatro — ver [`Orquestrador::recrutar`].
+    recrutas: Mutex<HashMap<String, usize>>,
 }
 
 impl Orquestrador {
@@ -90,6 +93,7 @@ impl Orquestrador {
             esperando: Mutex::new(HashMap::new()),
             bloqueados: Mutex::new(HashMap::new()),
             perguntas: Mutex::new(HashMap::new()),
+            recrutas: Mutex::new(HashMap::new()),
         }
     }
 
@@ -395,6 +399,158 @@ impl Orquestrador {
         }
     }
 
+    /// O agente põe outro agente no canvas. É o Maestro Mode do M4.
+    ///
+    /// Devolve o **nome** do recrutado, não o id: é por nome que o modelo vai
+    /// endereçá-lo em `enviar_para`, e devolver id convidaria a copiar o id
+    /// para um campo que espera nome.
+    ///
+    /// Não pede card. Recrutar não grava em disco nem destrói nada — o que ele
+    /// faz é gastar dinheiro, e para isso existem os dois tetos abaixo em vez
+    /// de um clique. Um card por recruta transformaria "monte um time de
+    /// quatro" em quatro interrupções, que é o ruído que faz o usuário aprovar
+    /// sem ler.
+    pub fn recrutar(
+        self: &Arc<Self>,
+        de: &Sessao,
+        workspace_id: &str,
+        papel: &str,
+        nome: &str,
+    ) -> Resultado<String> {
+        let nome = nome.trim();
+        if nome.is_empty() {
+            return Err(Erro::invalido("o agente novo precisa de um nome"));
+        }
+
+        // Teto por cadeia. O `ARQUITETURA.md §6` limita a CONVERSA entre nós;
+        // nenhum dos três limites do M3 impede um Maestro de recrutar cem num
+        // turno só, porque recrutar não é salto nem gasto de mensagem.
+        let trace = self.traces.lock().ok().and_then(|t| t.get(&de.id).cloned());
+        if let Some(trace) = &trace {
+            let ja = self
+                .recrutas
+                .lock()
+                .map(|r| r.get(&trace.id).copied().unwrap_or(0))
+                .unwrap_or(0);
+            if ja >= MAX_RECRUTAS_POR_CADEIA {
+                self.encerrar_cadeia(
+                    &trace.id,
+                    &de.node_id,
+                    &format!("o time passou de {MAX_RECRUTAS_POR_CADEIA} agentes recrutados"),
+                );
+                return Err(Erro::invalido(format!(
+                    "você já recrutou {MAX_RECRUTAS_POR_CADEIA} agentes nesta tarefa, que é o \
+                     limite. Trabalhe com o time que você tem."
+                )));
+            }
+        }
+
+        let (papel, no) = {
+            let banco = self.banco()?;
+
+            // Teto por workspace, para o caso que o de cima não cobre: três
+            // hoje, três amanhã, três depois.
+            if banco.quantos_agentes(workspace_id)? >= MAX_AGENTES_POR_WORKSPACE {
+                return Err(Erro::invalido(format!(
+                    "este workspace já tem {MAX_AGENTES_POR_WORKSPACE} agentes, que é o limite. \
+                     Peça à pessoa para dispensar alguém antes de recrutar mais."
+                )));
+            }
+
+            let papel = banco.papel_por_nome(papel)?.ok_or_else(|| {
+                let nomes: Vec<String> = banco
+                    .listar_papeis()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|p| p.nome)
+                    .collect();
+                Erro::invalido(format!(
+                    "não existe papel chamado \"{papel}\". Os que existem: {}",
+                    nomes.join(", ")
+                ))
+            })?;
+
+            if banco.papel_por_nome(nome)?.is_some() || ja_existe_no(&banco, workspace_id, nome) {
+                return Err(Erro::invalido(format!(
+                    "já existe alguém chamado \"{nome}\" aqui; escolha outro nome"
+                )));
+            }
+
+            let recrutador = banco.obter_no(&de.node_id)?;
+            let (x, y) = lugar_para_o_novo(&banco, &recrutador);
+            let no = banco.criar_no_recrutado(
+                workspace_id,
+                TipoNo::Agente,
+                nome,
+                x,
+                y,
+                Some(&papel.id),
+                Some(&recrutador.id),
+            )?;
+            // Já ligado a quem recrutou, nos dois sentidos que o cabo dá.
+            // Sem cabo, o recrutado é uma ilha: ninguém alcança e ele não
+            // alcança ninguém — e o §4 diz que sem cabo o nó não existe.
+            banco.criar_cabo(workspace_id, &recrutador.id, &no.id, TipoCabo::FalaCom)?;
+            (papel, no)
+        };
+
+        if let (Some(trace), Ok(mut r)) = (&trace, self.recrutas.lock()) {
+            *r.entry(trace.id.clone()).or_insert(0) += 1;
+        }
+
+        // O canvas precisa saber: um nó que aparece no banco e não na tela é
+        // um agente trabalhando onde ninguém vê.
+        (self.sink)(EventoNucleo::CanvasMudou {
+            workspace_id: workspace_id.to_string(),
+            motivo: format!("{} recrutou {} como {}", de.node_id, no.nome, papel.nome),
+        });
+
+        Ok(no.nome)
+    }
+
+    /// Encerra a sessão de um agente recrutado. **Não apaga o nó.**
+    ///
+    /// A `ESPECIFICACAO.md §5` diz `-> { encerrado: true }`, e a palavra é
+    /// exata: apagar um nó levaria a conversa dele junto (CASCADE), e destruir
+    /// trabalho por conta de um agente é o oposto do `ARQUITETURA.md §8`. Quem
+    /// apaga nó é a pessoa, com o botão que já existe.
+    pub fn dispensar(self: &Arc<Self>, de: &Sessao, nome_alvo: &str) -> Resultado<()> {
+        let alvo = {
+            let banco = self.banco()?;
+            let recrutador = banco.obter_no(&de.node_id)?;
+            let procurado = nome_alvo.trim().to_lowercase();
+            banco
+                .listar_nos(&recrutador.workspace_id)?
+                .into_iter()
+                // Só quem ELE recrutou. Sem esta linha um agente dispensaria
+                // qualquer vizinho, inclusive um que a pessoa criou à mão.
+                .find(|n| {
+                    n.recrutado_por.as_deref() == Some(recrutador.id.as_str())
+                        && n.nome.trim().to_lowercase() == procurado
+                })
+                .ok_or_else(|| {
+                    Erro::invalido(format!(
+                        "você não recrutou ninguém chamado \"{nome_alvo}\", então não pode \
+                         dispensar. Só quem recrutou dispensa."
+                    ))
+                })?
+        };
+
+        let sessao = self.banco()?.sessao_do_no(&alvo.id)?;
+        if let Some(s) = sessao {
+            // Cancelar faz o resto certo: mata o processo, nega os cards
+            // abertos e solta quem esperava por ele.
+            let _ = self.cancelar(&s.id);
+            self.banco()?.gravar_mensagem(
+                &s.id,
+                PapelMensagem::Sistema,
+                "Dispensado por quem recrutou. O nó e a conversa continuam aqui.",
+                Uso::default(),
+            )?;
+        }
+        Ok(())
+    }
+
     /// O agente diz que terminou. Vira uma linha na conversa; o turno segue
     /// até o fim normalmente.
     pub fn concluir(&self, sessao: &Sessao, resumo: &str) -> Resultado<()> {
@@ -647,7 +803,12 @@ impl Orquestrador {
         let banco = self.banco()?;
         let no = banco.obter_no(&sessao.node_id)?;
         let workspace = banco.obter_workspace(&no.workspace_id)?;
+        // Papel apagado enquanto o nó existia deixa `role_id` apontando para o
+        // nada só até o `ON DELETE SET NULL` rodar; entre uma coisa e outra,
+        // seguir sem papel é melhor que recusar o turno.
+        let papel = no.role_id.as_deref().and_then(|id| banco.obter_papel(id).ok());
         Ok(ContextoSessao {
+            papel,
             session_id: sessao.id.clone(),
             node_id: sessao.node_id.clone(),
             pasta: workspace.pasta,
@@ -673,6 +834,41 @@ impl Orquestrador {
     fn vivos(&self) -> Resultado<std::sync::MutexGuard<'_, HashMap<String, SessaoViva>>> {
         self.vivos.lock().map_err(|_| Erro::invalido("as sessões ficaram num estado ruim"))
     }
+}
+
+/// Já existe um nó com este nome no workspace?
+///
+/// Nome duplicado não é detalhe estético: `enviar_para` resolve o vizinho pelo
+/// nome, e dois iguais viram o erro "há mais de um nó chamado X" na hora em
+/// que o time tenta trabalhar. Melhor recusar ao recrutar.
+fn ja_existe_no(banco: &Banco, workspace_id: &str, nome: &str) -> bool {
+    let procurado = nome.trim().to_lowercase();
+    banco
+        .listar_nos(workspace_id)
+        .map(|nos| nos.iter().any(|n| n.nome.trim().to_lowercase() == procurado))
+        .unwrap_or(false)
+}
+
+/// Onde pôr o recrutado.
+///
+/// À direita de quem recrutou, empilhando para baixo conforme o time cresce.
+/// Não é layout bonito, é layout **previsível**: o usuário precisa achar quem
+/// apareceu, e "apareceu à direita do Organizador" é uma regra que ele aprende
+/// numa vez. Espalhar em círculo ou procurar espaço vazio ficaria mais bonito
+/// e menos legível.
+fn lugar_para_o_novo(banco: &Banco, recrutador: &No) -> (f64, f64) {
+    let quantos = banco
+        .listar_nos(&recrutador.workspace_id)
+        .map(|nos| {
+            nos.iter().filter(|n| n.recrutado_por.as_deref() == Some(&recrutador.id)).count()
+        })
+        .unwrap_or(0);
+    const VAO_X: f64 = 60.0;
+    const VAO_Y: f64 = 40.0;
+    (
+        recrutador.x + recrutador.w + VAO_X,
+        recrutador.y + (quantos as f64) * (recrutador.h + VAO_Y),
+    )
 }
 
 // ------------------------------------------------------------------- bomba

@@ -37,6 +37,9 @@ pub struct ContextoSessao {
     /// barramento no ar, o adaptador roda somente leitura e sozinho, porque
     /// escrever sem quem aprove é o que a §8 proíbe.
     pub url_barramento: Option<String>,
+    /// O papel deste nó, se tiver um. Decide o prompt de sistema, o conjunto
+    /// de ferramentas e o modelo.
+    pub papel: Option<Papel>,
 }
 
 impl ContextoSessao {

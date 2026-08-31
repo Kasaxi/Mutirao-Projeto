@@ -10,6 +10,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_inicial.sql"),
     include_str!("../migrations/002_adaptador_falso.sql"),
     include_str!("../migrations/003_regras_de_aprovacao.sql"),
+    include_str!("../migrations/004_papeis.sql"),
 ];
 
 pub struct Banco {
@@ -40,6 +41,12 @@ impl Banco {
         let mut banco = Banco { conn };
         banco.migrar()?;
         banco.destravar_sessoes()?;
+        // A biblioteca de papéis vive no banco, não em constante: o usuário
+        // edita os embutidos e cria os dele. Semear em toda abertura é
+        // idempotente pelo nome, e é o que garante que um banco do M3 ganhe a
+        // biblioteca ao abrir no M4 — sem migration que insere linha, que
+        // envelhece mal quando o texto do prompt muda.
+        crate::papeis::semear(&banco)?;
         Ok(banco)
     }
 
@@ -213,18 +220,77 @@ impl Banco {
             h,
             z: self.proximo_z(workspace_id)?,
             config: serde_json::json!({}),
+            role_id: None,
+            recrutado_por: None,
             criado_em: t,
             alterado_em: t,
         };
+        self.inserir_no(&no)?;
+        Ok(no)
+    }
+
+    /// Cria um nó já com papel e com quem o recrutou. É o caminho de
+    /// `recrutar`; o `criar_no` acima é o da pessoa clicando na barra.
+    pub fn criar_no_recrutado(
+        &self,
+        workspace_id: &str,
+        tipo: TipoNo,
+        nome: &str,
+        x: f64,
+        y: f64,
+        role_id: Option<&str>,
+        recrutado_por: Option<&str>,
+    ) -> Resultado<No> {
+        let mut no = self.criar_no(workspace_id, tipo, nome, x, y)?;
+        if role_id.is_some() || recrutado_por.is_some() {
+            self.conn.execute(
+                "UPDATE node SET role_id = ?2, recrutado_por = ?3 WHERE id = ?1",
+                params![no.id, role_id, recrutado_por],
+            )?;
+            no.role_id = role_id.map(String::from);
+            no.recrutado_por = recrutado_por.map(String::from);
+        }
+        Ok(no)
+    }
+
+    fn inserir_no(&self, no: &No) -> Resultado<()> {
         self.conn.execute(
             "INSERT INTO node (id, workspace_id, ensaio_id, tipo, nome, x, y, w, h, z,
-                               config_json, criado_em, alterado_em)
-             VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                               config_json, criado_em, alterado_em, role_id, recrutado_por)
+             VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![no.id, no.workspace_id, no.tipo.como_texto(), no.nome,
                     no.x, no.y, no.w, no.h, no.z,
-                    no.config.to_string(), no.criado_em, no.alterado_em],
+                    no.config.to_string(), no.criado_em, no.alterado_em,
+                    no.role_id, no.recrutado_por],
         )?;
-        Ok(no)
+        Ok(())
+    }
+
+    /// Põe (ou tira, com `None`) o papel de um nó.
+    pub fn definir_papel_do_no(&self, node_id: &str, role_id: Option<&str>) -> Resultado<()> {
+        if let Some(id) = role_id {
+            // Falha cedo e com nome, em vez de estourar FK lá embaixo.
+            self.obter_papel(id)?;
+        }
+        let n = self.conn.execute(
+            "UPDATE node SET role_id = ?2, alterado_em = ?3 WHERE id = ?1",
+            params![node_id, role_id, agora()],
+        )?;
+        if n == 0 {
+            return Err(Erro::nao_encontrado("nó", node_id));
+        }
+        Ok(())
+    }
+
+    /// Quantos nós de agente o workspace tem. É o teto do
+    /// [`MAX_AGENTES_POR_WORKSPACE`] que consulta isto.
+    pub fn quantos_agentes(&self, workspace_id: &str) -> Resultado<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT count(*) FROM node WHERE workspace_id = ?1 AND tipo = 'agente'",
+            params![workspace_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
     }
 
     fn proximo_z(&self, workspace_id: &str) -> Resultado<i64> {
@@ -237,11 +303,9 @@ impl Banco {
     }
 
     pub fn listar_nos(&self, workspace_id: &str) -> Resultado<Vec<No>> {
-        let mut st = self.conn.prepare(
-            "SELECT id, workspace_id, ensaio_id, tipo, nome, x, y, w, h, z,
-                    config_json, criado_em, alterado_em
-             FROM node WHERE workspace_id = ?1 ORDER BY z ASC",
-        )?;
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {COLUNAS_NO} FROM node WHERE workspace_id = ?1 ORDER BY z ASC"
+        ))?;
         let linhas = st.query_map(params![workspace_id], le_no)?;
         Ok(linhas.collect::<Result<Vec<_>, _>>()?)
     }
@@ -415,11 +479,8 @@ impl Banco {
     }
 
     pub fn obter_no(&self, id: &str) -> Resultado<No> {
-        let mut st = self.conn.prepare(
-            "SELECT id, workspace_id, ensaio_id, tipo, nome, x, y, w, h, z,
-                    config_json, criado_em, alterado_em
-             FROM node WHERE id = ?1",
-        )?;
+        let mut st =
+            self.conn.prepare(&format!("SELECT {COLUNAS_NO} FROM node WHERE id = ?1"))?;
         st.query_row(params![id], le_no).map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => Erro::nao_encontrado("nó", id),
             outro => Erro::Banco(outro),
@@ -860,6 +921,223 @@ impl Banco {
         let linhas = st.query_map(params![session_id], le_ferramenta)?;
         Ok(linhas.collect::<Result<Vec<_>, _>>()?)
     }
+
+    // --------------------------------------------------------------- papéis
+
+    pub fn criar_papel(
+        &self,
+        nome: &str,
+        prompt: &str,
+        ferramentas: &[String],
+        autonomia: Autonomia,
+        modelo: Option<&str>,
+        embutido: bool,
+    ) -> Resultado<Papel> {
+        let nome = nome.trim();
+        if nome.is_empty() {
+            return Err(Erro::invalido("o papel precisa de um nome"));
+        }
+        if prompt.trim().is_empty() {
+            return Err(Erro::invalido(
+                "um papel sem prompt é um agente sem papel — escreva o que ele é",
+            ));
+        }
+        let p = Papel {
+            id: novo_id(),
+            nome: nome.to_string(),
+            prompt: prompt.trim().to_string(),
+            ferramentas: ferramentas.to_vec(),
+            autonomia,
+            modelo: modelo.map(String::from),
+            embutido,
+            criado_em: agora(),
+        };
+        self.conn
+            .execute(
+                "INSERT INTO role (id, nome, prompt, ferramentas_json, autonomia, modelo,
+                                   embutido, criado_em)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![p.id, p.nome, p.prompt, serde_json::to_string(&p.ferramentas)?,
+                        p.autonomia.como_texto(), p.modelo, p.embutido as i64, p.criado_em],
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    Erro::invalido(format!("já existe um papel chamado \"{}\"", p.nome))
+                }
+                outro => Erro::Banco(outro),
+            })?;
+        Ok(p)
+    }
+
+    pub fn obter_papel(&self, id: &str) -> Resultado<Papel> {
+        let mut st =
+            self.conn.prepare(&format!("SELECT {COLUNAS_PAPEL} FROM role WHERE id = ?1"))?;
+        st.query_row(params![id], le_papel).map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Erro::nao_encontrado("papel", id),
+            outro => Erro::Banco(outro),
+        })
+    }
+
+    /// Papel pelo nome, comparando sem caixa. É por aqui que `recrutar` e a
+    /// abertura de partitura resolvem "Redator" — nome é o que a pessoa e o
+    /// modelo escrevem; id é detalhe interno.
+    pub fn papel_por_nome(&self, nome: &str) -> Resultado<Option<Papel>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {COLUNAS_PAPEL} FROM role WHERE lower(nome) = lower(?1)"
+        ))?;
+        match st.query_row(params![nome.trim()], le_papel) {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(Erro::Banco(e)),
+        }
+    }
+
+    pub fn listar_papeis(&self) -> Resultado<Vec<Papel>> {
+        // Embutidos primeiro: a biblioteca que veio com o app é o que o
+        // usuário procura na maior parte das vezes.
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {COLUNAS_PAPEL} FROM role ORDER BY embutido DESC, nome ASC"
+        ))?;
+        let linhas = st.query_map([], le_papel)?;
+        Ok(linhas.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Edita um papel. Embutido também se edita — o que não se pode é apagar.
+    pub fn editar_papel(
+        &self,
+        id: &str,
+        prompt: &str,
+        ferramentas: &[String],
+        autonomia: Autonomia,
+        modelo: Option<&str>,
+    ) -> Resultado<Papel> {
+        if prompt.trim().is_empty() {
+            return Err(Erro::invalido("um papel sem prompt é um agente sem papel"));
+        }
+        let n = self.conn.execute(
+            "UPDATE role SET prompt = ?2, ferramentas_json = ?3, autonomia = ?4, modelo = ?5
+             WHERE id = ?1",
+            params![id, prompt.trim(), serde_json::to_string(&ferramentas.to_vec())?,
+                    autonomia.como_texto(), modelo],
+        )?;
+        if n == 0 {
+            return Err(Erro::nao_encontrado("papel", id));
+        }
+        self.obter_papel(id)
+    }
+
+    /// Apaga um papel. Os nós que o usavam ficam sem papel (`ON DELETE SET
+    /// NULL`), e não somem junto: apagar um papel não pode levar a conversa.
+    pub fn remover_papel(&self, id: &str) -> Resultado<()> {
+        let p = self.obter_papel(id)?;
+        if p.embutido {
+            // Recusar em vez de apagar é o certo: o usuário duplica e edita a
+            // cópia. Um embutido apagado voltaria na próxima subida do app, e
+            // "apaguei e voltou" é pior que "não dá para apagar".
+            return Err(Erro::invalido(format!(
+                "\"{}\" veio com o app e não dá para apagar. Duplique e edite a cópia.",
+                p.nome
+            )));
+        }
+        self.conn.execute("DELETE FROM role WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Quantos nós usam este papel. O front mostra antes de apagar.
+    pub fn quantos_usam_o_papel(&self, id: &str) -> Resultado<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT count(*) FROM node WHERE role_id = ?1",
+            params![id],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    // ----------------------------------------------------------- partituras
+
+    pub fn salvar_partitura(
+        &self,
+        workspace_id: &str,
+        nome: &str,
+        snapshot: &Snapshot,
+    ) -> Resultado<Partitura> {
+        let nome = nome.trim();
+        if nome.is_empty() {
+            return Err(Erro::invalido("o time precisa de um nome para você achar depois"));
+        }
+        if snapshot.nos.is_empty() {
+            return Err(Erro::invalido("não dá para salvar um time sem ninguém nele"));
+        }
+        self.obter_workspace(workspace_id)?;
+        let p = Partitura {
+            id: novo_id(),
+            workspace_id: workspace_id.to_string(),
+            nome: nome.to_string(),
+            snapshot: snapshot.clone(),
+            criado_em: agora(),
+        };
+        // Salvar duas vezes com o mesmo nome substitui, e não dá erro: o
+        // usuário que repete o nome está atualizando o time, não descobrindo
+        // um índice único.
+        self.conn.execute(
+            "INSERT INTO partitura (id, workspace_id, nome, snapshot_json, criado_em)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(workspace_id, nome) DO UPDATE SET
+                 snapshot_json = excluded.snapshot_json,
+                 criado_em     = excluded.criado_em",
+            params![p.id, p.workspace_id, p.nome,
+                    serde_json::to_string(&p.snapshot)?, p.criado_em],
+        )?;
+        // O ON CONFLICT pode ter atualizado a linha antiga, que guarda o id
+        // dela. Reler é o que devolve a verdade em vez do que tentamos gravar.
+        self.partitura_por_nome(workspace_id, nome)?
+            .ok_or_else(|| Erro::invalido("a partitura sumiu logo depois de salva"))
+    }
+
+    pub fn partitura_por_nome(
+        &self,
+        workspace_id: &str,
+        nome: &str,
+    ) -> Resultado<Option<Partitura>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, workspace_id, nome, snapshot_json, criado_em
+             FROM partitura WHERE workspace_id = ?1 AND nome = ?2",
+        )?;
+        match st.query_row(params![workspace_id, nome.trim()], le_partitura) {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(Erro::Banco(e)),
+        }
+    }
+
+    pub fn obter_partitura(&self, id: &str) -> Resultado<Partitura> {
+        let mut st = self.conn.prepare(
+            "SELECT id, workspace_id, nome, snapshot_json, criado_em FROM partitura WHERE id = ?1",
+        )?;
+        st.query_row(params![id], le_partitura).map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Erro::nao_encontrado("time salvo", id),
+            outro => Erro::Banco(outro),
+        })
+    }
+
+    pub fn listar_partituras(&self, workspace_id: &str) -> Resultado<Vec<Partitura>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, workspace_id, nome, snapshot_json, criado_em
+             FROM partitura WHERE workspace_id = ?1 ORDER BY criado_em DESC",
+        )?;
+        let linhas = st.query_map(params![workspace_id], le_partitura)?;
+        Ok(linhas.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn remover_partitura(&self, id: &str) -> Resultado<()> {
+        let n = self.conn.execute("DELETE FROM partitura WHERE id = ?1", params![id])?;
+        if n == 0 {
+            return Err(Erro::nao_encontrado("time salvo", id));
+        }
+        Ok(())
+    }
 }
 
 const SELECT_SESSAO_POR_ID: &str =
@@ -894,6 +1172,11 @@ fn le_workspace(r: &Row) -> rusqlite::Result<Workspace> {
     })
 }
 
+/// Colunas do nó, na ordem que [`le_no`] espera. Uma constante só porque três
+/// consultas liam a mesma lista à mão, e a 004 teve de mexer nas três.
+const COLUNAS_NO: &str = "id, workspace_id, ensaio_id, tipo, nome, x, y, w, h, z,
+                          config_json, criado_em, alterado_em, role_id, recrutado_por";
+
 fn le_no(r: &Row) -> rusqlite::Result<No> {
     let tipo_txt: String = r.get(3)?;
     let config_txt: String = r.get(10)?;
@@ -913,6 +1196,39 @@ fn le_no(r: &Row) -> rusqlite::Result<No> {
         config: serde_json::from_str(&config_txt).unwrap_or_else(|_| serde_json::json!({})),
         criado_em: r.get(11)?,
         alterado_em: r.get(12)?,
+        role_id: r.get(13)?,
+        recrutado_por: r.get(14)?,
+    })
+}
+
+fn le_papel(r: &Row) -> rusqlite::Result<Papel> {
+    let ferramentas: String = r.get(3)?;
+    let autonomia: String = r.get(4)?;
+    Ok(Papel {
+        id: r.get(0)?,
+        nome: r.get(1)?,
+        prompt: r.get(2)?,
+        ferramentas: serde_json::from_str(&ferramentas).unwrap_or_default(),
+        autonomia: Autonomia::do_texto(&autonomia).unwrap_or(Autonomia::Cauteloso),
+        modelo: r.get(5)?,
+        embutido: r.get::<_, i64>(6)? != 0,
+        criado_em: r.get(7)?,
+    })
+}
+
+const COLUNAS_PAPEL: &str =
+    "id, nome, prompt, ferramentas_json, autonomia, modelo, embutido, criado_em";
+
+fn le_partitura(r: &Row) -> rusqlite::Result<Partitura> {
+    let snapshot: String = r.get(3)?;
+    Ok(Partitura {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        nome: r.get(2)?,
+        // Snapshot ilegível vira time vazio em vez de derrubar a listagem: uma
+        // partitura corrompida não pode esconder as outras.
+        snapshot: serde_json::from_str(&snapshot).unwrap_or_default(),
+        criado_em: r.get(4)?,
     })
 }
 

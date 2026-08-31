@@ -17,12 +17,15 @@ pub mod ferramentas;
 pub mod mcp;
 pub mod modelo;
 pub mod orquestrador;
+pub mod papeis;
+pub mod partituras;
 
 pub use agente::{AdaptadorFalso, AgenteAdapter, ContextoSessao, Fabrica, FabricaFalsa, Roteiro};
 pub use arquivos::ItemArquivo;
 pub use barramento::{Aprovacoes, Barramento};
 pub use claude::{AdaptadorClaude, FabricaClaude};
 pub use db::Banco;
+pub use papeis::{ferramentas_do_papel, pode_recrutar};
 pub use erro::{Erro, Resultado};
 pub use modelo::*;
 pub use orquestrador::{sink_mudo, Orquestrador, Sink};
@@ -39,7 +42,7 @@ mod testes {
 
     /// Quantas migrations existem hoje. Ao somar uma, este número sobe junto —
     /// é o lembrete de que o esquema mudou e o teste de baixo cobre a subida.
-    const VERSAO_ESQUEMA: i64 = 3;
+    const VERSAO_ESQUEMA: i64 = 4;
 
     #[test]
     fn migration_aplica_e_e_idempotente() {
@@ -2133,6 +2136,7 @@ mod testes {
             sessao_externa_id: None,
             token: "segredo-que-nao-pode-vazar".into(),
             url_barramento: Some("http://127.0.0.1:7777".into()),
+            papel: None,
         };
         assert_eq!(ctx.url_de_aprovacao().unwrap(), "http://127.0.0.1:7777/aprovacao");
         assert_eq!(ctx.url_do_mcp().unwrap(), "http://127.0.0.1:7777/mcp");

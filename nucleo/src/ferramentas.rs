@@ -35,6 +35,11 @@ pub const SERVIDOR: &str = "mutirao";
 /// completo — ver o cabeçalho deste módulo.
 pub const FERRAMENTAS_QUE_GRAVAM: &[&str] = &["escrever_nota", "escrever_arquivo"];
 
+/// As de montar time. Não passam pela escada de autonomia: quem as tem é quem
+/// as listou no papel. Um Revisor `solto` roda comando e ainda assim não monta
+/// time; um Organizador `padrao` monta. Ver `papeis::pode_recrutar`.
+pub const FERRAMENTAS_DE_TIME: &[&str] = &["recrutar", "dispensar"];
+
 pub fn nome_completo(ferramenta: &str) -> String {
     format!("mcp__{SERVIDOR}__{ferramenta}")
 }
@@ -165,6 +170,38 @@ pub fn catalogo() -> Vec<Value> {
                 "additionalProperties": false,
             }),
         ),
+        ferramenta(
+            "recrutar",
+            "Põe um agente novo no canvas, já ligado a você, e devolve o nome dele. \
+             Recrute o mínimo que resolve: cada agente custa dinheiro, e um time \
+             grande demais gasta mais se coordenando que trabalhando.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "papel": {
+                        "type": "string",
+                        "description": "papel da biblioteca: Pesquisador, Redator, Revisor, Analista",
+                    },
+                    "nome": {
+                        "type": "string",
+                        "description": "como ele aparece no canvas; escolha um nome que diga a função",
+                    },
+                },
+                "required": ["papel", "nome"],
+                "additionalProperties": false,
+            }),
+        ),
+        ferramenta(
+            "dispensar",
+            "Encerra a sessão de um agente que VOCÊ recrutou. O nó continua no \
+             canvas com a conversa dele — quem apaga nó é a pessoa, não você.",
+            json!({
+                "type": "object",
+                "properties": { "no": { "type": "string", "description": "nome do agente" } },
+                "required": ["no"],
+                "additionalProperties": false,
+            }),
+        ),
     ]
 }
 
@@ -185,13 +222,30 @@ pub fn executar(
     nome: &str,
     args: &Value,
 ) -> Resultado<Value> {
-    let (node_id, workspace_id, pasta) = {
+    let (node_id, workspace_id, pasta, papel) = {
         let b = trava(banco)?;
         let no = b.obter_no(&sessao.node_id)?;
         let ws = b.obter_workspace(&no.workspace_id)?;
-        (no.id, ws.id, ws.pasta)
+        let papel = match &no.role_id {
+            Some(id) => Some(b.obter_papel(id)?),
+            None => None,
+        };
+        (no.id, ws.id, ws.pasta, papel)
     };
     let pasta = std::path::PathBuf::from(pasta);
+
+    // O papel decide o que este nó alcança, e a decisão vale AQUI.
+    //
+    // O `--tools` da CLI já esconde o resto, mas esconder não é impedir: um
+    // `tools/call` chega por HTTP, e quem monta o corpo é o processo do agente.
+    // Escopo que só existe no cliente é escopo que o cliente pode ignorar.
+    let permitidas = crate::papeis::ferramentas_do_papel(papel.as_ref());
+    if !permitidas.iter().any(|f| f == nome) {
+        // A mesma frase de uma ferramenta que não existe, e de propósito: "não
+        // existe" e "existe mas você não pode" são a diferença entre um erro e
+        // um mapa do que há do outro lado. Ver o cabeçalho deste módulo.
+        return Err(Erro::invalido(format!("não existe ferramenta chamada {nome}")));
+    }
 
     match nome {
         "enviar_para" | "avisar" => {
@@ -303,10 +357,20 @@ pub fn executar(
             Ok(json!({ "ok": true }))
         }
 
-        _ => {
-            let _ = workspace_id;
-            Err(Erro::invalido(format!("não existe ferramenta chamada {nome}")))
+        "recrutar" => {
+            let papel = texto(args, "papel")?;
+            let nome = texto(args, "nome")?;
+            let novo = orq.recrutar(sessao, &workspace_id, &papel, &nome)?;
+            Ok(json!({ "no": novo }))
         }
+
+        "dispensar" => {
+            let alvo = texto(args, "no")?;
+            orq.dispensar(sessao, &alvo)?;
+            Ok(json!({ "encerrado": true }))
+        }
+
+        _ => Err(Erro::invalido(format!("não existe ferramenta chamada {nome}"))),
     }
 }
 

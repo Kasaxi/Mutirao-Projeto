@@ -89,6 +89,16 @@ fn main() {
             comandos::listar_pasta,
             comandos::ler_nota,
             comandos::escrever_nota,
+            comandos::listar_papeis,
+            comandos::criar_papel,
+            comandos::editar_papel,
+            comandos::remover_papel,
+            comandos::quantos_usam_o_papel,
+            comandos::definir_papel_do_no,
+            comandos::salvar_time,
+            comandos::listar_times,
+            comandos::abrir_time,
+            comandos::remover_time,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao subir o Mutirão");
@@ -139,6 +149,7 @@ fn emitir(app: &AppHandle, evento: EventoNucleo) {
         EventoNucleo::AprovacaoDecidida { .. } => "aprovacao:decidida",
         EventoNucleo::NoMensagem { .. } => "no:mensagem",
         EventoNucleo::CadeiaEncerrada { .. } => "cadeia:encerrada",
+        EventoNucleo::CanvasMudou { .. } => "canvas:mudou",
     };
     if let Err(e) = app.emit(nome, &evento) {
         // Falhar em avisar não pode derrubar o turno: a resposta já está
