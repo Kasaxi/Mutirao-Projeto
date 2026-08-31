@@ -499,12 +499,102 @@ pub enum EventoNucleo {
         /// quanto o que foi decidido.
         decidido_por: String,
     },
+    /// Um nó falou com outro. A interface anima o cabo — é o que torna a ponte
+    /// visível em vez de mágica.
+    NoMensagem {
+        de_node: String,
+        para_node: String,
+        trace_id: String,
+        /// `tipo_mensagem` e não `tipo`: o `serde(tag = "tipo")` deste enum já
+        /// ocupa esse nome no JSON, e um campo homônimo não compila.
+        tipo_mensagem: TipoMensagem,
+    },
+    /// Uma cadeia acabou por limite, não por conclusão. Sempre chega ao
+    /// usuário: o `ARQUITETURA.md §6` é explícito em que estourar um limite
+    /// "avisa o usuário em vez de queimar crédito em silêncio".
+    CadeiaEncerrada {
+        trace_id: String,
+        node_id: String,
+        motivo: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CustoDoNo {
     pub node_id: String,
     pub custo: f64,
+}
+
+// ------------------------------------------------------------- a ponte
+
+/// Uma cadeia de conversa entre nós.
+///
+/// Nasce quando o usuário fala com um agente e viaja com cada `enviar_para`.
+/// É o que amarra "Pesquisador → Redator → Pesquisador" numa coisa só, e é
+/// sobre ela que os três limites do `ARQUITETURA.md §6` incidem.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Trace {
+    pub id: String,
+    /// Quantas vezes esta cadeia já mudou de nó.
+    pub saltos: u32,
+}
+
+impl Trace {
+    /// Começa uma cadeia. Toda mensagem do usuário abre uma nova.
+    pub fn novo() -> Trace {
+        Trace { id: format!("tr_{}", &novo_id()[..8]), saltos: 0 }
+    }
+
+    /// A cadeia dando mais um passo. `None` quando já andou demais.
+    pub fn saltar(&self) -> Option<Trace> {
+        if self.saltos + 1 > MAX_SALTOS {
+            return None;
+        }
+        Some(Trace { id: self.id.clone(), saltos: self.saltos + 1 })
+    }
+}
+
+/// Teto de saltos de uma cadeia (`ARQUITETURA.md §6`).
+///
+/// Ciclo A→B→A é legítimo e comum — o Pesquisador pergunta, o Redator responde,
+/// o Pesquisador confirma. O que mata é o ciclo infinito, e é por isso que o
+/// limite é do host, não do agente: um agente convencido de que precisa de
+/// mais uma rodada sempre acha um motivo.
+pub const MAX_SALTOS: u32 = 6;
+
+/// Prazo padrão de uma mensagem que espera resposta, e o teto que o agente
+/// pode pedir. Os dois em `ESPECIFICACAO.md §5`.
+pub const PRAZO_MENSAGEM_PADRAO_MS: u64 = 600_000;
+pub const PRAZO_MENSAGEM_TETO_MS: u64 = 1_800_000;
+
+/// Quanto uma cadeia pode gastar antes de ser encerrada, em dólar.
+///
+/// Existe porque o pior desfecho de um ciclo malcomportado não é travar — é
+/// não travar, e queimar crédito a noite inteira em silêncio. Fixo no M3;
+/// vira configurável no M6, junto com o teto por workspace.
+pub const ORCAMENTO_POR_TRACE_USD: f64 = 1.00;
+
+/// O envelope do `ARQUITETURA.md §6`, do jeito que atravessa a ponte.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Envelope {
+    pub id: String,
+    pub de: String,
+    pub para: String,
+    pub tipo: TipoMensagem,
+    pub corpo: String,
+    pub refs: Vec<String>,
+    pub trace: String,
+    pub saltos: u32,
+    pub prazo_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TipoMensagem {
+    /// Espera resposta. O nó que mandou fica em `aguardando_no`.
+    Pedido,
+    /// Entrega e segue em frente.
+    Aviso,
 }
 
 // -------------------------------------------------------------- aprovação
@@ -584,6 +674,29 @@ pub fn descrever_ferramenta(ferramenta: &str, argumentos: &serde_json::Value) ->
             "Rodar um comando".to_string(),
             campo("command").chars().take(120).collect(),
         ),
+        // As duas do nosso servidor MCP que gravam. Os literais estão escritos
+        // à mão porque `match` não aceita expressão — o teste
+        // `os_nomes_mcp_do_card_batem_com_o_catalogo` é quem garante que eles
+        // continuem iguais a `ferramentas::nome_completo`.
+        "mcp__mutirao__escrever_nota" => {
+            let conteudo = campo("conteudo");
+            let modo = if campo("modo") == "acrescentar" { "acrescentar em" } else { "gravar" };
+            (
+                format!("Escrever na nota {}", campo("nota")),
+                format!(
+                    "{modo} · {} linhas · {}",
+                    conteudo.lines().count(),
+                    tamanho(conteudo.len())
+                ),
+            )
+        }
+        "mcp__mutirao__escrever_arquivo" => {
+            let conteudo = campo("conteudo");
+            (
+                format!("Gravar {}", arquivo("caminho")),
+                format!("{} linhas · {}", conteudo.lines().count(), tamanho(conteudo.len())),
+            )
+        }
         outro => (
             format!("Usar {outro}"),
             argumentos.to_string().chars().take(120).collect(),

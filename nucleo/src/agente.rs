@@ -31,10 +31,24 @@ pub struct ContextoSessao {
     /// Vai para a configuração do processo do agente e para lugar nenhum
     /// mais — ver `ESPECIFICACAO.md §4`.
     pub token: String,
-    /// Onde o agente pede licença antes de gravar. `None` desliga a aprovação
-    /// **e a escrita junto**: sem barramento no ar, o adaptador roda somente
-    /// leitura, porque escrever sem quem aprove é o que a §8 proíbe.
-    pub url_aprovacao: Option<String>,
+    /// Raiz do barramento (`http://127.0.0.1:porta`), de onde saem tanto a URL
+    /// do hook de aprovação quanto a do servidor MCP. `None` desliga a
+    /// aprovação **e a escrita junto**, e junto vai a ponte entre nós: sem
+    /// barramento no ar, o adaptador roda somente leitura e sozinho, porque
+    /// escrever sem quem aprove é o que a §8 proíbe.
+    pub url_barramento: Option<String>,
+}
+
+impl ContextoSessao {
+    /// Onde o hook `PreToolUse` bate.
+    pub fn url_de_aprovacao(&self) -> Option<String> {
+        self.url_barramento.as_ref().map(|u| format!("{}/aprovacao", u.trim_end_matches('/')))
+    }
+
+    /// Onde o servidor MCP do Mutirão atende.
+    pub fn url_do_mcp(&self) -> Option<String> {
+        self.url_barramento.as_ref().map(|u| format!("{}/mcp", u.trim_end_matches('/')))
+    }
 }
 
 pub trait AgenteAdapter: Send {

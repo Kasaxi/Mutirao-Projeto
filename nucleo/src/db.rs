@@ -480,6 +480,25 @@ impl Banco {
         Ok(())
     }
 
+    /// Muda o estado sem consultar a tabela de transições.
+    ///
+    /// Existe para os dois casos em que a tabela do §6 não tem aresta e a
+    /// alternativa seria pior que a exceção: cancelar de `aguardando_no`
+    /// (o §6 não prevê, e passar por `erro` mentiria sobre o que houve) e cair
+    /// em `erro` de onde quer que o adaptador tenha morrido. Fora daí use
+    /// [`Banco::mudar_estado_sessao`] — a checagem é o que impede o
+    /// orquestrador de gravar um estado impossível.
+    pub fn forcar_estado_sessao(&self, id: &str, destino: EstadoSessao) -> Resultado<()> {
+        let n = self.conn.execute(
+            "UPDATE session SET estado = ?2, ultimo_sinal_em = ?3 WHERE id = ?1",
+            params![id, destino.como_texto(), agora()],
+        )?;
+        if n == 0 {
+            return Err(Erro::nao_encontrado("sessão", id));
+        }
+        Ok(())
+    }
+
     /// Guarda o id de retomada que o agente devolveu. É isto que permite
     /// fechar o app e continuar a conversa amanhã.
     pub fn definir_sessao_externa(&self, id: &str, externa: &str) -> Resultado<()> {
@@ -544,25 +563,50 @@ impl Banco {
         conteudo: &str,
         uso: Uso,
     ) -> Resultado<Mensagem> {
+        self.gravar_mensagem_completa(session_id, papel, conteudo, uso, None, None)
+    }
+
+    /// A mesma coisa, mas amarrada a uma cadeia e, quando vem de outro nó, com
+    /// a origem. É o `trace_id` que o orçamento por cadeia soma depois.
+    pub fn gravar_mensagem_completa(
+        &self,
+        session_id: &str,
+        papel: PapelMensagem,
+        conteudo: &str,
+        uso: Uso,
+        trace_id: Option<&str>,
+        origem_node: Option<&str>,
+    ) -> Resultado<Mensagem> {
         let m = Mensagem {
             id: novo_id(),
             session_id: session_id.to_string(),
             papel,
-            origem_node: None,
+            origem_node: origem_node.map(String::from),
             conteudo: conteudo.to_string(),
             tokens: uso.tokens(),
             custo: if uso.custo_usd.is_finite() { uso.custo_usd } else { 0.0 },
-            trace_id: None,
+            trace_id: trace_id.map(String::from),
             criado_em: agora(),
         };
         self.conn.execute(
             "INSERT INTO message (id, session_id, papel, origem_node, conteudo,
                                   tokens, custo, trace_id, criado_em)
-             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, NULL, ?7)",
-            params![m.id, m.session_id, m.papel.como_texto(), m.conteudo,
-                    m.tokens, m.custo, m.criado_em],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![m.id, m.session_id, m.papel.como_texto(), m.origem_node, m.conteudo,
+                    m.tokens, m.custo, m.trace_id, m.criado_em],
         )?;
         Ok(m)
+    }
+
+    /// Quanto uma cadeia já custou. É a soma que o teto por trace compara —
+    /// o índice `idx_message_trace` existe desde a 001 justamente para isto.
+    pub fn custo_do_trace(&self, trace_id: &str) -> Resultado<f64> {
+        let total: Option<f64> = self.conn.query_row(
+            "SELECT SUM(custo) FROM message WHERE trace_id = ?1",
+            params![trace_id],
+            |r| r.get(0),
+        )?;
+        Ok(total.unwrap_or(0.0))
     }
 
     /// Histórico em ordem cronológica. `limite` existe porque uma conversa
@@ -749,7 +793,7 @@ impl Banco {
         // perguntar de novo" para gravar nesta pasta é uma decisão sobre uma
         // pasta; para `Bash` seria uma decisão sobre a máquina inteira, tomada
         // uma vez com um clique e esquecida no dia seguinte.
-        if !crate::barramento::FERRAMENTAS_QUE_ACEITAM_REGRA.contains(&ferramenta) {
+        if !crate::barramento::aceita_regra(ferramenta) {
             return Err(Erro::invalido(format!(
                 "{ferramenta} pergunta sempre: uma licença permanente para isso \
                  valeria pela máquina toda, não só por esta pasta"

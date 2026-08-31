@@ -61,8 +61,8 @@ fn monta(com_barramento: bool) -> Bancada {
     let orq = Arc::new(Orquestrador::novo(banco.clone(), fabrica, sink.clone()));
 
     let barramento = if com_barramento {
-        let b = Barramento::subir(banco.clone(), orq.aprovacoes(), sink).unwrap();
-        orq.ligar_barramento(b.url_de_aprovacao());
+        let b = Barramento::subir(banco.clone(), orq.clone(), sink).unwrap();
+        orq.ligar_barramento(b.url_base());
         Some(b)
     } else {
         None

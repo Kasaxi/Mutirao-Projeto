@@ -291,11 +291,16 @@ pub struct AdaptadorClaude {
     /// O `--settings` desta sessão, com o hook de aprovação. `None` quando não
     /// há barramento — e aí o adaptador roda somente leitura.
     arquivo_settings: Option<std::path::PathBuf>,
+    /// O `--mcp-config` desta sessão, apontando para o servidor MCP do
+    /// barramento. Anda junto com o de settings: um sem o outro seria ou uma
+    /// ponte sem aprovação, ou uma aprovação sem ponte.
+    arquivo_mcp: Option<std::path::PathBuf>,
 }
 
 impl AdaptadorClaude {
     pub fn novo(binario: impl Into<String>, ctx: ContextoSessao) -> Resultado<Self> {
         let arquivo_settings = AdaptadorClaude::escrever_settings(&ctx)?;
+        let arquivo_mcp = AdaptadorClaude::escrever_mcp(&ctx)?;
         Ok(AdaptadorClaude {
             binario: binario.into(),
             sessao_externa: Arc::new(Mutex::new(ctx.sessao_externa_id.clone())),
@@ -304,6 +309,7 @@ impl AdaptadorClaude {
             cancelado: Arc::new(AtomicBool::new(false)),
             prazo: PRAZO_PADRAO,
             arquivo_settings,
+            arquivo_mcp,
         })
     }
 
@@ -322,7 +328,10 @@ impl AdaptadorClaude {
         self
     }
 
-    fn comando(&self, texto: &str) -> Command {
+    /// A linha de comando do turno. `pub(crate)` só para o teste poder olhar
+    /// se o token vazou para dentro dela — ver
+    /// `o_token_da_sessao_nao_aparece_na_linha_de_comando`.
+    pub(crate) fn comando(&self, texto: &str) -> Command {
         let mut cmd = Command::new(&self.binario);
         cmd.arg("--print")
             .arg(texto)
@@ -342,15 +351,12 @@ impl AdaptadorClaude {
             // "unless --tools names them". Nomeá-las aqui devolve o poder de
             // montar um `.xlsx`, e cada uso passa pelo card.
             .arg("--tools")
-            .arg(if self.arquivo_settings.is_some() {
-                FERRAMENTAS_DISPONIVEIS
-            } else {
-                FERRAMENTAS_SO_LEITURA
-            })
+            .arg(self.disponiveis())
             .arg("--allowedTools")
-            .args(FERRAMENTAS_SEM_CARD)
-            // Nenhum servidor MCP ainda. As ferramentas de trabalho do §6
-            // entram por aqui quando existirem.
+            .args(self.sem_card())
+            // Só o nosso servidor MCP, nenhum dos que o usuário tenha
+            // configurado em `~/.claude`. Pelo mesmo motivo do `--restricted`:
+            // o mesmo workspace tem de se comportar igual em cada computador.
             .arg("--strict-mcp-config")
             // A pasta do workspace é o mundo do agente.
             .current_dir(&self.ctx.pasta)
@@ -363,10 +369,41 @@ impl AdaptadorClaude {
         if let Some(caminho) = &self.arquivo_settings {
             cmd.arg("--settings").arg(caminho);
         }
+        if let Some(caminho) = &self.arquivo_mcp {
+            cmd.arg("--mcp-config").arg(caminho);
+        }
         if let Some(id) = self.sessao_externa() {
             cmd.arg("--resume").arg(id);
         }
         cmd
+    }
+
+    /// O que o processo pode enxergar. `--restricted` tira tudo que não estiver
+    /// aqui, e isso vale para ferramenta de MCP também — nomeá-las é o que faz
+    /// a ponte existir para o modelo.
+    fn disponiveis(&self) -> String {
+        let base = if self.arquivo_settings.is_some() {
+            FERRAMENTAS_DISPONIVEIS
+        } else {
+            FERRAMENTAS_SO_LEITURA
+        };
+        let mut v = vec![base.to_string()];
+        if self.arquivo_mcp.is_some() {
+            v.extend(nomes_mcp());
+        }
+        v.join(",")
+    }
+
+    /// O que roda sem card. Leitura sempre; e, quando há barramento, as
+    /// ferramentas do §6 que **não** gravam — falar com outro nó, listar,
+    /// perguntar. Escrita fica de fora de propósito: as duas que gravam estão
+    /// no matcher do hook, e é lá que elas param.
+    fn sem_card(&self) -> Vec<String> {
+        let mut v: Vec<String> = FERRAMENTAS_SEM_CARD.iter().map(|s| s.to_string()).collect();
+        if self.arquivo_mcp.is_some() {
+            v.extend(nomes_mcp().into_iter().filter(|n| !crate::barramento::pede_licenca(n)));
+        }
+        v
     }
 
     /// Escreve o `--settings` desta sessão: um hook `PreToolUse` do tipo HTTP
@@ -376,13 +413,17 @@ impl AdaptadorClaude {
     /// também aceita), porque a linha de comando de um processo é legível por
     /// qualquer outro processo do mesmo usuário — e ali dentro vai o token.
     fn escrever_settings(ctx: &ContextoSessao) -> Resultado<Option<std::path::PathBuf>> {
-        let Some(url) = &ctx.url_aprovacao else {
+        let Some(url) = ctx.url_de_aprovacao() else {
             return Ok(None);
         };
         let settings = serde_json::json!({
             "hooks": {
                 "PreToolUse": [{
-                    "matcher": crate::barramento::FERRAMENTAS_QUE_PEDEM_LICENCA.join("|"),
+                    // Nativas e MCP no mesmo matcher. Medido na CLI 2.1.251: o
+                    // hook dispara para `mcp__mutirao__escrever_nota` também, e
+                    // negar impede a chamada — é isso que permite um gate só
+                    // para todos os caminhos de escrita.
+                    "matcher": crate::barramento::matcher_do_hook(),
                     "hooks": [{
                         "type": "http",
                         "url": url,
@@ -401,6 +442,32 @@ impl AdaptadorClaude {
         let caminho =
             std::env::temp_dir().join(format!("mutirao-{}-settings.json", ctx.session_id));
         std::fs::write(&caminho, serde_json::to_vec_pretty(&settings)?)?;
+        segredar(&caminho);
+        Ok(Some(caminho))
+    }
+
+    /// Escreve o `--mcp-config` desta sessão: um servidor HTTP só, o do
+    /// barramento, com o token da sessão no cabeçalho.
+    ///
+    /// Em arquivo pelo mesmo motivo do settings — a linha de comando de um
+    /// processo é legível por qualquer outro processo do mesmo usuário, e ali
+    /// dentro vai o token.
+    fn escrever_mcp(ctx: &ContextoSessao) -> Resultado<Option<std::path::PathBuf>> {
+        let Some(url) = ctx.url_do_mcp() else {
+            return Ok(None);
+        };
+        let config = serde_json::json!({
+            "mcpServers": {
+                crate::ferramentas::SERVIDOR: {
+                    "type": "http",
+                    "url": url,
+                    "headers": { crate::barramento::CABECALHO_TOKEN: ctx.token },
+                },
+            },
+        });
+
+        let caminho = std::env::temp_dir().join(format!("mutirao-{}-mcp.json", ctx.session_id));
+        std::fs::write(&caminho, serde_json::to_vec_pretty(&config)?)?;
         segredar(&caminho);
         Ok(Some(caminho))
     }
@@ -618,13 +685,22 @@ impl Fabrica for FabricaClaude {
 
 impl Drop for AdaptadorClaude {
     fn drop(&mut self) {
-        // O arquivo de settings carrega o token. Deixá-lo no temp depois que a
+        // Os dois arquivos carregam o token. Deixá-los no temp depois que a
         // sessão morreu é deixar um segredo válido para ninguém, mas legível
         // por qualquer coisa.
-        if let Some(caminho) = &self.arquivo_settings {
+        for caminho in [&self.arquivo_settings, &self.arquivo_mcp].into_iter().flatten() {
             let _ = std::fs::remove_file(caminho);
         }
     }
+}
+
+/// Os nomes das ferramentas do §6 como o modelo os vê.
+fn nomes_mcp() -> Vec<String> {
+    crate::ferramentas::catalogo()
+        .iter()
+        .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
+        .map(crate::ferramentas::nome_completo)
+        .collect()
 }
 
 /// Restringe o arquivo ao dono. No Windows o temp já é por usuário; no Unix,

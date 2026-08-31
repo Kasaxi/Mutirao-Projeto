@@ -50,7 +50,10 @@ impl EstadoApp {
         })
     }
 
-    pub fn orquestrador(&self) -> &Orquestrador {
+    /// O `Arc`, e não uma referência: desde o M3 o orquestrador precisa se
+    /// clonar para dentro da thread de cada turno, e por isso alguns métodos
+    /// pedem `self: &Arc<Self>`.
+    pub fn orquestrador(&self) -> &Arc<Orquestrador> {
         &self.orquestrador
     }
 }

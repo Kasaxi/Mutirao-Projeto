@@ -13,6 +13,8 @@ pub mod barramento;
 pub mod claude;
 pub mod db;
 pub mod erro;
+pub mod ferramentas;
+pub mod mcp;
 pub mod modelo;
 pub mod orquestrador;
 
@@ -291,7 +293,10 @@ mod testes {
     /// lista de tudo que o núcleo contou à interface.
     struct Bancada {
         banco: Arc<Mutex<Banco>>,
-        orq: Orquestrador,
+        /// `Arc` porque desde o M3 o orquestrador precisa se clonar para dentro
+        /// da thread de cada turno — é assim que a bomba de eventos consegue
+        /// puxar o próximo da fila quando o turno acaba.
+        orq: Arc<Orquestrador>,
         sessao: Sessao,
         node_id: String,
         workspace_id: String,
@@ -308,11 +313,11 @@ mod testes {
         let copia = avisos.clone();
         let sink: Sink = Arc::new(move |e| copia.lock().unwrap().push(e));
 
-        let orq = Orquestrador::novo(
+        let orq = Arc::new(Orquestrador::novo(
             banco.clone(),
             Arc::new(FabricaFalsa::com_roteiro(roteiro)),
             sink,
-        );
+        ));
         let sessao = orq.abrir_sessao(&no.id, Adaptador::Falso).unwrap();
         Bancada {
             banco,
@@ -438,20 +443,37 @@ mod testes {
     }
 
     #[test]
-    fn dois_turnos_ao_mesmo_tempo_no_mesmo_no_sao_recusados() {
-        // A regra "um turno por vez por nó" existe porque duas mensagens
-        // intercaladas produzem contexto embaralhado e resposta sem sentido.
+    fn dois_turnos_ao_mesmo_tempo_no_mesmo_no_viram_fila() {
+        // A regra "um turno por vez por nó" continua valendo — duas mensagens
+        // intercaladas produzem contexto embaralhado e resposta sem sentido. O
+        // que mudou no M3 foi o desfecho de quem chega no meio: em vez de
+        // recusa, fila. Recusar era defensável quando só o usuário falava com o
+        // nó; com outro nó do outro lado, recusar é perder trabalho.
         let b = bancada(Roteiro { atraso_ms: 30, ..roteiro_simples() });
         b.orq.enviar(&b.sessao.id, "primeira").unwrap();
         assert!(b.esperar(|b| b.estado() == EstadoSessao::Pensando));
 
-        match b.orq.enviar(&b.sessao.id, "segunda") {
-            Err(Erro::Invalido(m)) => assert!(m.contains("turno"), "mensagem: {m}"),
-            outro => panic!("esperava recusa, veio {outro:?}"),
-        }
+        b.orq.enviar(&b.sessao.id, "segunda").expect("a segunda entra na fila");
+        // Enfileirada é diferente de começada: enquanto o primeiro turno corre,
+        // a segunda não pode ter virado linha no histórico.
+        assert!(
+            b.historico().iter().all(|m| m.conteudo != "segunda"),
+            "a segunda começou junto com a primeira"
+        );
+
+        // E o segundo turno sai sozinho, sem ninguém falar de novo com o nó.
+        assert!(b.esperar(|b| b.historico().iter().filter(|m| m.papel == PapelMensagem::Agente)
+            .count()
+            == 2));
         assert!(b.esperar_ocioso());
-        // a segunda não pode ter entrado no histórico nem pela metade
-        assert!(b.historico().iter().all(|m| m.conteudo != "segunda"));
+
+        let ordem: Vec<&str> = b
+            .historico()
+            .iter()
+            .filter(|m| m.papel == PapelMensagem::Usuario)
+            .map(|m| if m.conteudo == "primeira" { "1" } else { "2" })
+            .collect();
+        assert_eq!(ordem, vec!["1", "2"], "a fila é em ordem de chegada");
     }
 
     #[test]
@@ -916,7 +938,7 @@ mod testes {
 
     struct Balcao {
         banco: Arc<Mutex<Banco>>,
-        orq: Orquestrador,
+        orq: Arc<Orquestrador>,
         aprovacoes: Arc<Aprovacoes>,
         sink: Sink,
         token: String,
@@ -939,11 +961,11 @@ mod testes {
         let copia = avisos.clone();
         let sink: Sink = Arc::new(move |e| copia.lock().unwrap().push(e));
 
-        let orq = Orquestrador::novo(
+        let orq = Arc::new(Orquestrador::novo(
             banco.clone(),
             Arc::new(FabricaFalsa::demonstracao()),
             sink.clone(),
-        );
+        ));
         Balcao {
             aprovacoes: orq.aprovacoes(),
             banco,
@@ -1248,13 +1270,13 @@ mod testes {
     fn o_barramento_sobe_em_porta_propria_e_so_no_localhost() {
         let b = balcao();
         let barramento =
-            Barramento::subir(b.banco.clone(), b.aprovacoes.clone(), b.sink.clone()).unwrap();
+            Barramento::subir(b.banco.clone(), b.orq.clone(), b.sink.clone()).unwrap();
         assert!(barramento.porta() > 0);
         assert!(barramento.url_de_aprovacao().starts_with("http://127.0.0.1:"));
         // Porta escolhida pelo sistema: duas cópias do app não brigam, e não
         // existe alvo previsível para quem estiver na mesma máquina.
         let outro =
-            Barramento::subir(b.banco.clone(), b.aprovacoes.clone(), b.sink.clone()).unwrap();
+            Barramento::subir(b.banco.clone(), b.orq.clone(), b.sink.clone()).unwrap();
         assert_ne!(barramento.porta(), outro.porta());
     }
 
@@ -1387,5 +1409,739 @@ mod testes {
             assert!(banco.sessao_do_no(&b.node_id).unwrap().is_none());
             assert!(banco.historico(&b.sessao.id, 10).unwrap().is_empty());
         }
+    }
+
+    // ================================================================ M3 ===
+    // A ponte. Um nó fala com outro pelas ferramentas do §6, e o que ele
+    // enxerga do canvas é decidido pelos cabos — só por eles.
+
+    use crate::ferramentas;
+    use serde_json::json;
+
+    /// Dois agentes ligados por `fala_com` e uma nota que só um deles escreve.
+    struct Ponte {
+        banco: Arc<Mutex<Banco>>,
+        orq: Arc<Orquestrador>,
+        /// Pesquisador, quem começa a conversa.
+        a: Sessao,
+        /// Redator, quem responde.
+        b_no: String,
+        avisos: Arc<Mutex<Vec<EventoNucleo>>>,
+        _pasta: Pasta,
+    }
+
+    /// O Pesquisador já no meio de um turno, que é de onde o §6 permite as
+    /// transições para `aguardando_no` e `aguardando_humano`. Serve aos testes
+    /// que chamam a ferramenta direto, sem passar por um adaptador.
+    fn ponte() -> Ponte {
+        ponte_com(Arc::new(FabricaFalsa::com_roteiro(roteiro_simples())), true)
+    }
+
+    fn ponte_com(fabrica: Arc<dyn Fabrica>, em_turno: bool) -> Ponte {
+        let pasta = Pasta::nova();
+        let banco = Banco::em_memoria().unwrap();
+        let ws = banco.criar_workspace("Obra", pasta.0.to_str().unwrap()).unwrap();
+        let a = banco.criar_no(&ws.id, TipoNo::Agente, "Pesquisador", 0.0, 0.0).unwrap();
+        let b = banco.criar_no(&ws.id, TipoNo::Agente, "Redator", 300.0, 0.0).unwrap();
+        // Existe, mas sem cabo: é o nó que precisa ser invisível.
+        banco.criar_no(&ws.id, TipoNo::Agente, "Isolado", 600.0, 0.0).unwrap();
+        let nota = banco.criar_no(&ws.id, TipoNo::Nota, "Briefing", 0.0, 300.0).unwrap();
+        let outra = banco.criar_no(&ws.id, TipoNo::Nota, "Sigilo", 300.0, 300.0).unwrap();
+
+        banco.criar_cabo(&ws.id, &a.id, &b.id, TipoCabo::FalaCom).unwrap();
+        banco.criar_cabo(&ws.id, &a.id, &nota.id, TipoCabo::LeNota).unwrap();
+        banco.criar_cabo(&ws.id, &a.id, &nota.id, TipoCabo::EscreveNota).unwrap();
+        // `Sigilo` fica ligada só ao Redator: o Pesquisador não pode vê-la.
+        banco.criar_cabo(&ws.id, &b.id, &outra.id, TipoCabo::LeNota).unwrap();
+
+        let banco = Arc::new(Mutex::new(banco));
+        let avisos: Arc<Mutex<Vec<EventoNucleo>>> = Arc::new(Mutex::new(Vec::new()));
+        let copia = avisos.clone();
+        let sink: Sink = Arc::new(move |e| copia.lock().unwrap().push(e));
+
+        let orq = Arc::new(Orquestrador::novo(banco.clone(), fabrica, sink));
+        let sessao_a = orq.abrir_sessao(&a.id, Adaptador::Falso).unwrap();
+        if em_turno {
+            banco.lock().unwrap().mudar_estado_sessao(&sessao_a.id, EstadoSessao::Pensando).unwrap();
+        }
+
+        Ponte { banco, orq, a: sessao_a, b_no: b.id, avisos, _pasta: pasta }
+    }
+
+    impl Ponte {
+        fn usar(&self, nome: &str, args: serde_json::Value) -> Resultado<serde_json::Value> {
+            ferramentas::executar(&self.orq, &self.banco, &self.a, nome, &args)
+        }
+
+        fn historico_de(&self, node_id: &str) -> Vec<Mensagem> {
+            let banco = self.banco.lock().unwrap();
+            let s = banco.sessao_do_no(node_id).unwrap().unwrap();
+            banco.historico(&s.id, 100).unwrap()
+        }
+
+        fn eventos(&self) -> Vec<EventoNucleo> {
+            self.avisos.lock().unwrap().clone()
+        }
+    }
+
+    // ---- escopo pelos cabos ----------------------------------------------
+
+    #[test]
+    fn no_sem_cabo_simplesmente_nao_existe() {
+        // A frase precisa ser a MESMA nos dois casos. Duas mensagens
+        // diferentes — "não existe" versus "existe mas você não pode" — fazem
+        // de cada tentativa uma sonda que mapeia o canvas inteiro.
+        let p = ponte();
+        let desligado = p
+            .usar("enviar_para", json!({ "no": "Isolado", "mensagem": "oi" }))
+            .expect_err("nó sem cabo não devia ser alcançável");
+        let inexistente = p
+            .usar("enviar_para", json!({ "no": "Fantasma", "mensagem": "oi" }))
+            .expect_err("nó que não existe não devia ser alcançável");
+        assert_eq!(desligado.to_string(), inexistente.to_string().replace("Fantasma", "Isolado"));
+        assert!(desligado.to_string().contains("Isolado"), "{desligado}");
+    }
+
+    #[test]
+    fn listar_nos_mostra_so_o_que_os_cabos_deixam_ver() {
+        let p = ponte();
+        let v = p.usar("listar_nos", json!({})).unwrap();
+        let nomes: Vec<String> = v["nos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["nome"].as_str().unwrap().to_string())
+            .collect();
+        assert!(nomes.contains(&"Redator".to_string()));
+        assert!(nomes.contains(&"Briefing".to_string()));
+        assert!(!nomes.contains(&"Isolado".to_string()), "vazou nó sem cabo: {nomes:?}");
+        assert!(!nomes.contains(&"Sigilo".to_string()), "vazou nota de outro nó: {nomes:?}");
+    }
+
+    #[test]
+    fn ler_nota_sem_cabo_de_leitura_e_recusado() {
+        let p = ponte();
+        assert!(p.usar("ler_nota", json!({ "nota": "Sigilo" })).is_err());
+        // E a que tem cabo passa, mesmo antes de o arquivo existir.
+        assert_eq!(p.usar("ler_nota", json!({ "nota": "Briefing" })).unwrap()["conteudo"], "");
+    }
+
+    #[test]
+    fn escrever_nota_grava_o_md_na_pasta_do_workspace() {
+        let p = ponte();
+        p.usar("escrever_nota", json!({ "nota": "Briefing", "conteudo": "primeira linha\n" }))
+            .unwrap();
+        p.usar(
+            "escrever_nota",
+            json!({ "nota": "Briefing", "conteudo": "segunda", "modo": "acrescentar" }),
+        )
+        .unwrap();
+        assert_eq!(
+            p.usar("ler_nota", json!({ "nota": "Briefing" })).unwrap()["conteudo"],
+            "primeira linha\nsegunda"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p._pasta.0.join("Briefing.md")).unwrap(),
+            "primeira linha\nsegunda"
+        );
+    }
+
+    // ---- a ponte A→B -----------------------------------------------------
+
+    #[test]
+    fn enviar_para_espera_a_resposta_do_outro_no() {
+        let p = ponte();
+        let r = p
+            .usar("enviar_para", json!({ "no": "Redator", "mensagem": "resuma o contrato" }))
+            .unwrap();
+        assert_eq!(r["resposta"], "O item 4.2 contradiz o anexo I.");
+        assert_eq!(r["de"], "Redator");
+
+        // Do lado do Redator ficou registrado quem falou e em que cadeia.
+        let dele = p.historico_de(&p.b_no);
+        let recado = dele.iter().find(|m| m.papel == PapelMensagem::No).expect("recado do nó");
+        assert_eq!(recado.conteudo, "resuma o contrato");
+        assert_eq!(recado.origem_node.as_deref(), Some(p.a.node_id.as_str()));
+        assert!(recado.trace_id.is_some(), "recado sem cadeia");
+
+        // E a interface soube, para poder animar o cabo.
+        let animou = p.eventos().iter().any(|e| {
+            matches!(e, EventoNucleo::NoMensagem { para_node, tipo_mensagem, .. }
+                if para_node == &p.b_no && *tipo_mensagem == TipoMensagem::Pedido)
+        });
+        assert!(animou, "nenhum no:mensagem para animar o cabo");
+    }
+
+    #[test]
+    fn avisar_entrega_e_volta_na_hora() {
+        let p = ponte();
+        let r = p.usar("avisar", json!({ "no": "Redator", "mensagem": "terminei a parte 1" })).unwrap();
+        assert_eq!(r["entregue"], true);
+        assert!(r.get("resposta").is_none(), "aviso não devia esperar resposta");
+    }
+
+    #[test]
+    fn as_refs_citadas_chegam_junto_com_o_recado() {
+        let p = ponte();
+        p.usar("enviar_para", json!({
+            "no": "Redator",
+            "mensagem": "escreva a introdução",
+            "refs": ["Briefing", "contrato.txt"],
+        }))
+        .unwrap();
+        let recado = p
+            .historico_de(&p.b_no)
+            .into_iter()
+            .find(|m| m.papel == PapelMensagem::No)
+            .expect("recado do nó");
+        assert!(recado.conteudo.contains("Briefing"), "{}", recado.conteudo);
+        assert!(recado.conteudo.contains("contrato.txt"), "{}", recado.conteudo);
+    }
+
+    #[test]
+    fn nome_ambiguo_nao_vira_chute() {
+        let p = ponte();
+        let banco = p.banco.lock().unwrap();
+        let ws = banco.obter_no(&p.a.node_id).unwrap().workspace_id;
+        // Um segundo nó com o MESMO nome do Pesquisador, ligado a ele.
+        let gemeo = banco.criar_no(&ws, TipoNo::Agente, "Redator", 900.0, 0.0).unwrap();
+        banco.criar_cabo(&ws, &p.a.node_id, &gemeo.id, TipoCabo::FalaCom).unwrap();
+        drop(banco);
+
+        // Agora "Redator" é ambíguo: escolher um dos dois mandaria o recado
+        // para o lugar errado sem ninguém perceber.
+        let e = p
+            .usar("enviar_para", json!({ "no": "Redator", "mensagem": "oi" }))
+            .expect_err("nome ambíguo devia ser erro");
+        assert!(e.to_string().contains("mais de um"), "{e}");
+    }
+
+    // ---- os três limites -------------------------------------------------
+
+    #[test]
+    fn a_cadeia_para_no_limite_de_saltos() {
+        // O limite é do host, não do agente: um agente convencido de que
+        // precisa de mais uma rodada sempre acha um motivo.
+        let mut t = Trace::novo();
+        for _ in 0..MAX_SALTOS {
+            t = t.saltar().expect("dentro do limite");
+        }
+        assert_eq!(t.saltos, MAX_SALTOS);
+        assert!(t.saltar().is_none(), "passou de {MAX_SALTOS} saltos");
+        // O id não muda no caminho: é a MESMA cadeia andando, e é por ele que o
+        // orçamento soma o gasto de todos os nós que ela atravessou.
+        assert_eq!(t.id, Trace::novo().saltar().map(|_| t.id.clone()).unwrap());
+        assert_ne!(Trace::novo().id, Trace::novo().id, "cada pedido abre a sua cadeia");
+    }
+
+    #[test]
+    fn a_cadeia_para_quando_estoura_o_orcamento() {
+        // O pior desfecho de um ciclo malcomportado não é travar — é não
+        // travar, e queimar crédito a noite inteira em silêncio.
+        let p = ponte_com(Arc::new(FabricaTravada::nova()), false);
+
+        // Um turno de verdade, que fica aberto: é ele que fixa a cadeia sobre
+        // a qual o orçamento incide.
+        p.orq.enviar(&p.a.id, "comece").unwrap();
+        assert!(esperar(|| p.banco.lock().unwrap().obter_sessao(&p.a.id).unwrap().estado
+            == EstadoSessao::Pensando));
+
+        let trace = p
+            .historico_de(&p.a.node_id)
+            .into_iter()
+            .find_map(|m| m.trace_id)
+            .expect("o turno abriu uma cadeia");
+
+        // Antes do estouro, a ponte funciona.
+        assert!(p.usar("avisar", json!({ "no": "Redator", "mensagem": "oi" })).is_ok());
+
+        // Agora a cadeia fica cara.
+        p.banco
+            .lock()
+            .unwrap()
+            .gravar_mensagem_completa(
+                &p.a.id,
+                PapelMensagem::Agente,
+                "turno caro",
+                Uso { tokens_entrada: 0, tokens_saida: 0, custo_usd: ORCAMENTO_POR_TRACE_USD },
+                Some(&trace),
+                None,
+            )
+            .unwrap();
+
+        let e = p
+            .usar("enviar_para", json!({ "no": "Redator", "mensagem": "mais uma rodada" }))
+            .expect_err("o orçamento devia ter barrado");
+        assert!(e.to_string().contains("orçamento"), "{e}");
+
+        // E o usuário soube: estourar limite avisa, não queima crédito calado.
+        let avisou = p.eventos().iter().any(|ev| {
+            matches!(ev, EventoNucleo::CadeiaEncerrada { trace_id, motivo, .. }
+                if trace_id == &trace && motivo.contains("US$"))
+        });
+        assert!(avisou, "a cadeia acabou em silêncio: {:?}", p.eventos());
+    }
+
+    #[test]
+    fn o_prazo_pedido_pelo_agente_tem_teto() {
+        // Sem teto, um agente pediria um prazo de dias e prenderia o nó — o
+        // pior desfecho, porque um nó preso não pede atenção e não explica nada.
+        assert_eq!(ferramentas::prazo_pedido(&json!({})), PRAZO_MENSAGEM_PADRAO_MS);
+        assert_eq!(ferramentas::prazo_pedido(&json!({ "prazo_ms": 5_000 })), 5_000);
+        assert_eq!(
+            ferramentas::prazo_pedido(&json!({ "prazo_ms": 999_999_999u64 })),
+            PRAZO_MENSAGEM_TETO_MS
+        );
+        // Zero seria "não espere nada" — vira o padrão, não uma falha imediata.
+        assert_eq!(ferramentas::prazo_pedido(&json!({ "prazo_ms": 0 })), PRAZO_MENSAGEM_PADRAO_MS);
+    }
+
+    /// Adaptador que começa o turno e não termina nunca. Serve para segurar uma
+    /// cadeia aberta enquanto o teste mexe nela.
+    struct FabricaTravada {
+        /// Guarda os remetentes vivos: soltos, o canal fecharia e a bomba de
+        /// eventos daria o turno por morto.
+        presos: Arc<Mutex<Vec<std::sync::mpsc::Sender<EventoAgente>>>>,
+    }
+
+    impl FabricaTravada {
+        fn nova() -> FabricaTravada {
+            FabricaTravada { presos: Arc::new(Mutex::new(Vec::new())) }
+        }
+    }
+
+    impl Fabrica for FabricaTravada {
+        fn criar(&self, _a: Adaptador, _c: &ContextoSessao) -> Resultado<Box<dyn AgenteAdapter>> {
+            Ok(Box::new(AdaptadorTravado { presos: self.presos.clone() }))
+        }
+    }
+
+    struct AdaptadorTravado {
+        presos: Arc<Mutex<Vec<std::sync::mpsc::Sender<EventoAgente>>>>,
+    }
+
+    impl AgenteAdapter for AdaptadorTravado {
+        fn turno(&mut self, _t: &str) -> Resultado<std::sync::mpsc::Receiver<EventoAgente>> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.presos.lock().unwrap().push(tx);
+            Ok(rx)
+        }
+        fn cancelar(&mut self) {
+            self.presos.lock().unwrap().clear();
+        }
+    }
+
+    /// Espera uma condição por até dois segundos. Os turnos rodam em thread;
+    /// ler o banco na hora seguinte à chamada leria o estado de antes.
+    fn esperar(cond: impl Fn() -> bool) -> bool {
+        for _ in 0..400 {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    // ---- espera cruzada ---------------------------------------------------
+
+    /// Um adaptador que, a cada turno, pergunta ao vizinho — e só devolve
+    /// resposta quando o vizinho responder. Dois deles apontando um para o
+    /// outro é a espera circular que o `fecharia_ciclo` existe para pegar.
+    struct FabricaTeimosa {
+        orq: Arc<Mutex<Option<Arc<Orquestrador>>>>,
+        banco: Arc<Mutex<Banco>>,
+    }
+
+    struct AdaptadorTeimoso {
+        orq: Arc<Mutex<Option<Arc<Orquestrador>>>>,
+        banco: Arc<Mutex<Banco>>,
+        session_id: String,
+        node_id: String,
+    }
+
+    impl Fabrica for FabricaTeimosa {
+        fn criar(&self, _a: Adaptador, ctx: &ContextoSessao) -> Resultado<Box<dyn AgenteAdapter>> {
+            Ok(Box::new(AdaptadorTeimoso {
+                orq: self.orq.clone(),
+                banco: self.banco.clone(),
+                session_id: ctx.session_id.clone(),
+                node_id: ctx.node_id.clone(),
+            }))
+        }
+    }
+
+    impl AgenteAdapter for AdaptadorTeimoso {
+        fn turno(&mut self, texto: &str) -> Resultado<std::sync::mpsc::Receiver<EventoAgente>> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let orq = self.orq.lock().unwrap().clone().expect("orquestrador ligado");
+            let banco = self.banco.clone();
+            let session_id = self.session_id.clone();
+            let node_id = self.node_id.clone();
+            let texto = texto.to_string();
+
+            std::thread::spawn(move || {
+                let (sessao, vizinho) = {
+                    let b = banco.lock().unwrap();
+                    let s = b.obter_sessao(&session_id).unwrap();
+                    let v = b
+                        .vizinhos(&node_id, TipoCabo::FalaCom)
+                        .unwrap()
+                        .first()
+                        .map(|id| b.obter_no(id).unwrap().nome);
+                    (s, v)
+                };
+                let final_ = match vizinho {
+                    Some(nome) => {
+                        let r = ferramentas::executar(
+                            &orq,
+                            &banco,
+                            &sessao,
+                            "enviar_para",
+                            &json!({ "no": nome, "mensagem": format!("e você? ({texto})") }),
+                        );
+                        match r {
+                            Ok(v) => format!("o vizinho disse: {v}"),
+                            Err(e) => format!("não deu para perguntar: {e}"),
+                        }
+                    }
+                    None => "não tenho com quem falar".to_string(),
+                };
+                let _ = tx.send(EventoAgente::TurnoConcluido {
+                    texto_final: final_,
+                    uso: Uso::default(),
+                });
+            });
+            Ok(rx)
+        }
+
+        fn cancelar(&mut self) {}
+    }
+
+    #[test]
+    fn dois_nos_esperando_um_pelo_outro_nao_travam_o_app() {
+        // É a promessa do M3 em uma frase: "um ciclo A→B→A encerra sozinho sem
+        // travar o app". O limite de saltos não pega este caso — saltos só
+        // contam quando alguém consegue andar — e o prazo pegaria em dez
+        // minutos, que para quem está olhando a tela é travar.
+        let celula: Arc<Mutex<Option<Arc<Orquestrador>>>> = Arc::new(Mutex::new(None));
+        let pasta = Pasta::nova();
+        let banco = Banco::em_memoria().unwrap();
+        let ws = banco.criar_workspace("Obra", pasta.0.to_str().unwrap()).unwrap();
+        let a = banco.criar_no(&ws.id, TipoNo::Agente, "Pesquisador", 0.0, 0.0).unwrap();
+        let b = banco.criar_no(&ws.id, TipoNo::Agente, "Redator", 300.0, 0.0).unwrap();
+        // Um cabo só: `vizinhos` enxerga os dois sentidos, então cada um vê o
+        // outro e os dois querem perguntar.
+        banco.criar_cabo(&ws.id, &a.id, &b.id, TipoCabo::FalaCom).unwrap();
+        let banco = Arc::new(Mutex::new(banco));
+
+        let fabrica: Arc<dyn Fabrica> =
+            Arc::new(FabricaTeimosa { orq: celula.clone(), banco: banco.clone() });
+        let orq = Arc::new(Orquestrador::novo(banco.clone(), fabrica, sink_mudo()));
+        *celula.lock().unwrap() = Some(orq.clone());
+
+        let sessao = orq.abrir_sessao(&a.id, Adaptador::Falso).unwrap();
+        let inicio = std::time::Instant::now();
+        orq.enviar(&sessao.id, "comece").unwrap();
+
+        // Os dois nós têm de voltar a ficar parados, e depressa.
+        let parou = (0..600).any(|_| {
+            let b = banco.lock().unwrap();
+            let ea = b.obter_sessao(&sessao.id).unwrap().estado;
+            let sb = b.sessao_do_no(&b_id(&b, &ws.id, "Redator")).unwrap();
+            let eb = sb.map(|s| s.estado).unwrap_or(EstadoSessao::Ocioso);
+            drop(b);
+            let quietos = !matches!(ea, EstadoSessao::Pensando | EstadoSessao::AguardandoNo)
+                && !matches!(eb, EstadoSessao::Pensando | EstadoSessao::AguardandoNo);
+            if !quietos {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            quietos
+        });
+        assert!(parou, "os dois nós ficaram travados um pelo outro");
+        assert!(
+            inicio.elapsed() < Duration::from_secs(20),
+            "levou {:?} — o prazo não pode ser o que desata isto",
+            inicio.elapsed()
+        );
+
+        // E o modelo recebeu uma instrução do que fazer, não um erro mudo.
+        let dito = banco
+            .lock()
+            .unwrap()
+            .historico(&sessao.id, 50)
+            .unwrap()
+            .iter()
+            .map(|m| m.conteudo.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            dito.contains("esperando a SUA resposta"),
+            "desatou por outro caminho que não a detecção de ciclo: {dito}"
+        );
+    }
+
+    /// Acha um nó pelo nome dentro do workspace. Só para o teste acima ler o
+    /// estado do outro lado da ponte.
+    fn b_id(banco: &Banco, workspace_id: &str, nome: &str) -> String {
+        banco
+            .listar_nos(workspace_id)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.nome == nome)
+            .expect("nó existe")
+            .id
+    }
+
+    // ---- perguntar ao humano e concluir ----------------------------------
+
+    #[test]
+    fn perguntar_humano_para_o_no_ate_a_proxima_mensagem_do_usuario() {
+        let p = ponte();
+        let orq = p.orq.clone();
+        let sessao = p.a.clone();
+        let banco = p.banco.clone();
+        let pergunta = std::thread::spawn(move || {
+            ferramentas::executar(
+                &orq,
+                &banco,
+                &sessao,
+                "perguntar_humano",
+                &json!({ "pergunta": "uso o índice velho ou o novo?", "opcoes": ["velho", "novo"] }),
+            )
+        });
+
+        // O nó pede atenção e fica parado.
+        let pediu = (0..400).any(|_| {
+            let e = p.banco.lock().unwrap().obter_sessao(&p.a.id).unwrap().estado;
+            if e != EstadoSessao::AguardandoHumano {
+                std::thread::sleep(Duration::from_millis(5));
+                return false;
+            }
+            true
+        });
+        assert!(pediu, "o nó não entrou em aguardando_humano");
+
+        // A próxima mensagem do usuário é a RESPOSTA, não um turno novo.
+        p.orq.enviar(&p.a.id, "o novo").unwrap();
+        let r = pergunta.join().unwrap().unwrap();
+        assert_eq!(r["resposta"], "o novo");
+
+        // E as opções apareceram na conversa, senão o usuário responde no escuro.
+        let conversa = p.historico_de(&p.a.node_id);
+        assert!(conversa.iter().any(|m| m.conteudo.contains("velho · novo")), "{conversa:?}");
+    }
+
+    #[test]
+    fn concluir_vira_linha_na_conversa() {
+        let p = ponte();
+        p.usar("concluir", json!({ "resumo": "minuta revisada, 3 pontos abertos" })).unwrap();
+        let conversa = p.historico_de(&p.a.node_id);
+        assert!(
+            conversa.iter().any(|m| m.conteudo == "Entregue: minuta revisada, 3 pontos abertos"),
+            "{conversa:?}"
+        );
+    }
+
+    #[test]
+    fn ferramenta_que_nao_existe_da_erro_e_nao_panica() {
+        let p = ponte();
+        assert!(p.usar("formatar_o_disco", json!({})).is_err());
+        // Campo obrigatório faltando também é erro de gente, não pânico.
+        assert!(p.usar("enviar_para", json!({ "no": "Redator" })).is_err());
+    }
+
+    // ---- o servidor MCP --------------------------------------------------
+
+    #[test]
+    fn o_handshake_do_mcp_e_o_que_a_cli_faz_de_verdade() {
+        // A ordem e os formatos abaixo foram capturados de uma sonda contra a
+        // CLI 2.1.251 — ver o cabeçalho de `mcp.rs`.
+        let p = ponte();
+        let token = p.banco.lock().unwrap().token_da_sessao(&p.a.id).unwrap();
+        let chamar = |corpo: serde_json::Value| {
+            crate::mcp::tratar(&p.orq, &p.banco, &token, &corpo.to_string())
+        };
+
+        // 1. `server/discover`, com id em TEXTO, antes do handshake.
+        let r = chamar(json!({
+            "jsonrpc": "2.0", "id": "server-discover-probe-1", "method": "server/discover",
+        }));
+        assert_eq!(r.codigo, 200);
+        let v: serde_json::Value = serde_json::from_str(&r.corpo).unwrap();
+        assert_eq!(v["id"], "server-discover-probe-1");
+
+        // 2. `initialize` — devolvemos a versão que ele pediu.
+        let r = chamar(json!({
+            "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": { "protocolVersion": "2025-11-25" },
+        }));
+        let v: serde_json::Value = serde_json::from_str(&r.corpo).unwrap();
+        assert_eq!(v["result"]["protocolVersion"], "2025-11-25");
+        assert_eq!(v["result"]["serverInfo"]["name"], ferramentas::SERVIDOR);
+
+        // 3. `notifications/initialized`: sem id, e portanto sem resposta.
+        let r = chamar(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+        assert_eq!(r.codigo, 202);
+        assert!(r.corpo.is_empty(), "respondemos a uma notificação: {}", r.corpo);
+
+        // 4. `tools/list` traz as dez ferramentas do §6.
+        let r = chamar(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
+        let v: serde_json::Value = serde_json::from_str(&r.corpo).unwrap();
+        assert_eq!(v["result"]["tools"].as_array().unwrap().len(), ferramentas::catalogo().len());
+
+        // 5. Método que não existe vira erro de JSON-RPC, não 500.
+        let r = chamar(json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/list" }));
+        let v: serde_json::Value = serde_json::from_str(&r.corpo).unwrap();
+        assert_eq!(v["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn o_mcp_so_atende_quem_tem_o_token_da_sessao() {
+        let p = ponte();
+        let listar = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string();
+        for token in ["", "   ", "token-inventado", &"a".repeat(64)] {
+            let r = crate::mcp::tratar(&p.orq, &p.banco, token, &listar);
+            assert_eq!(r.codigo, 403, "token {token:?} passou");
+            // 403 sem explicação: nem a lista de ferramentas sai para quem não
+            // se identificou.
+            assert!(!r.corpo.contains("enviar_para"), "vazou o catálogo: {}", r.corpo);
+        }
+    }
+
+    #[test]
+    fn tools_call_aceita_o_nome_com_e_sem_prefixo() {
+        let p = ponte();
+        let token = p.banco.lock().unwrap().token_da_sessao(&p.a.id).unwrap();
+        for nome in ["listar_nos", "mcp__mutirao__listar_nos"] {
+            let r = crate::mcp::tratar(
+                &p.orq,
+                &p.banco,
+                &token,
+                &json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": { "name": nome, "arguments": {} },
+                })
+                .to_string(),
+            );
+            let v: serde_json::Value = serde_json::from_str(&r.corpo).unwrap();
+            assert_eq!(v["result"]["isError"], false, "falhou com {nome}: {}", r.corpo);
+            assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("Redator"));
+        }
+    }
+
+    #[test]
+    fn erro_de_ferramenta_chega_ao_modelo_em_vez_de_virar_erro_de_protocolo() {
+        // A diferença importa: erro de JSON-RPC o cliente engole; resultado com
+        // `isError` o modelo LÊ — e "esse nó não existe" é o que ele precisa ler
+        // para corrigir o rumo sozinho.
+        let p = ponte();
+        let token = p.banco.lock().unwrap().token_da_sessao(&p.a.id).unwrap();
+        let r = crate::mcp::tratar(
+            &p.orq,
+            &p.banco,
+            &token,
+            &json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "enviar_para", "arguments": { "no": "Isolado", "mensagem": "oi" } },
+            })
+            .to_string(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&r.corpo).unwrap();
+        assert!(v["error"].is_null(), "virou erro de protocolo: {}", r.corpo);
+        assert_eq!(v["result"]["isError"], true);
+        assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("Isolado"));
+    }
+
+    #[test]
+    fn o_conteudo_de_uma_leitura_vai_cru_e_o_resto_vai_como_json() {
+        let p = ponte();
+        let token = p.banco.lock().unwrap().token_da_sessao(&p.a.id).unwrap();
+        p.usar("escrever_nota", json!({ "nota": "Briefing", "conteudo": "linha 1\nlinha 2" }))
+            .unwrap();
+        let r = crate::mcp::tratar(
+            &p.orq,
+            &p.banco,
+            &token,
+            &json!({
+                "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": { "name": "ler_nota", "arguments": { "nota": "Briefing" } },
+            })
+            .to_string(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&r.corpo).unwrap();
+        // Cru: sem aspas escapadas gastando token à toa.
+        assert_eq!(v["result"]["content"][0]["text"], "linha 1\nlinha 2");
+    }
+
+    // ---- o gate de escrita cobre o MCP também ----------------------------
+
+    #[test]
+    fn as_ferramentas_que_gravam_pedem_card_com_o_nome_completo() {
+        // Se `escrever_nota` escapasse do card, o barramento seria uma porta
+        // dos fundos para exatamente o que o card existe para impedir.
+        for f in ferramentas::FERRAMENTAS_QUE_GRAVAM {
+            let completo = ferramentas::nome_completo(f);
+            assert!(crate::barramento::pede_licenca(&completo), "{completo} escapou do card");
+            assert!(crate::barramento::matcher_do_hook().contains(&completo));
+            // Gravar na pasta aceita "não perguntar de novo", como o `Write`.
+            assert!(crate::barramento::aceita_regra(&completo));
+        }
+        // E as que só leem ou conversam continuam sem card — um card que vira
+        // ruído é um card que o usuário aprova sem ler.
+        for f in ["enviar_para", "listar_nos", "ler_nota", "concluir"] {
+            assert!(!crate::barramento::pede_licenca(&ferramentas::nome_completo(f)), "{f}");
+        }
+    }
+
+    #[test]
+    fn os_nomes_mcp_do_card_batem_com_o_catalogo() {
+        // `descrever_ferramenta` casa nomes literais porque `match` não aceita
+        // expressão. Este teste é o elo que impede os dois lados de divergirem.
+        let (r, d) = descrever_ferramenta(
+            &ferramentas::nome_completo("escrever_nota"),
+            &json!({ "nota": "Briefing", "conteudo": "uma\nduas" }),
+        );
+        assert_eq!(r, "Escrever na nota Briefing");
+        assert!(d.contains("2 linhas"), "{d}");
+
+        let (r, _) = descrever_ferramenta(
+            &ferramentas::nome_completo("escrever_arquivo"),
+            &json!({ "caminho": "sub/minuta.md", "conteudo": "x" }),
+        );
+        assert_eq!(r, "Gravar minuta.md");
+
+        // E o card mostra o que vai ser gravado, senão é um card que se aprova
+        // sem ler.
+        let pedido = crate::barramento::PedidoDoHook::do_json(&json!({
+            "tool_name": ferramentas::nome_completo("escrever_nota"),
+            "tool_input": { "nota": "Briefing", "conteudo": "o texto que vai para o disco" },
+            "tool_use_id": "toolu_1",
+        }))
+        .unwrap();
+        assert_eq!(pedido.argumentos["conteudo"], "o texto que vai para o disco");
+    }
+
+    #[test]
+    fn o_token_da_sessao_nao_aparece_na_linha_de_comando() {
+        // A linha de comando de um processo é legível por qualquer outro
+        // processo do mesmo usuário. Por isso hook e MCP vão em arquivo.
+        let ctx = ContextoSessao {
+            session_id: "ses_teste".into(),
+            node_id: "no_teste".into(),
+            pasta: std::env::temp_dir().to_string_lossy().to_string(),
+            sessao_externa_id: None,
+            token: "segredo-que-nao-pode-vazar".into(),
+            url_barramento: Some("http://127.0.0.1:7777".into()),
+        };
+        assert_eq!(ctx.url_de_aprovacao().unwrap(), "http://127.0.0.1:7777/aprovacao");
+        assert_eq!(ctx.url_do_mcp().unwrap(), "http://127.0.0.1:7777/mcp");
+
+        let a = AdaptadorClaude::novo("claude", ctx).unwrap();
+        assert!(a.pode_escrever());
+        let linha = format!("{:?}", a.comando("oi"));
+        assert!(!linha.contains("segredo-que-nao-pode-vazar"), "o token vazou: {linha}");
+        assert!(linha.contains("--mcp-config"), "sem ponte: {linha}");
+        assert!(linha.contains("mcp__mutirao__enviar_para"), "a ponte não foi nomeada: {linha}");
     }
 }

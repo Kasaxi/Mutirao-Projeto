@@ -54,6 +54,42 @@ pub const FERRAMENTAS_QUE_PEDEM_LICENCA: &[&str] =
 /// máquina num clique, e ninguém lembra desse clique uma semana depois.
 pub const FERRAMENTAS_QUE_ACEITAM_REGRA: &[&str] = &["Write", "Edit", "NotebookEdit"];
 
+/// Esta ferramenta precisa de card?
+///
+/// As duas listas — a nativa do Claude Code e a do nosso servidor MCP — são
+/// consultadas aqui, num lugar só. Se `escrever_nota` escapasse desta função,
+/// o barramento seria uma porta dos fundos para exatamente aquilo que o card
+/// existe para impedir.
+pub fn pede_licenca(ferramenta: &str) -> bool {
+    FERRAMENTAS_QUE_PEDEM_LICENCA.contains(&ferramenta)
+        || crate::ferramentas::FERRAMENTAS_QUE_GRAVAM
+            .iter()
+            .any(|f| crate::ferramentas::nome_completo(f) == ferramenta)
+}
+
+/// Esta aceita "não perguntar de novo"? Escrever nota e escrever arquivo sim,
+/// pela mesma razão que `Write`: é gravação na pasta do workspace, e o usuário
+/// que já disse sim para a pasta não quer dizer de novo a cada parágrafo.
+pub fn aceita_regra(ferramenta: &str) -> bool {
+    FERRAMENTAS_QUE_ACEITAM_REGRA.contains(&ferramenta)
+        || crate::ferramentas::FERRAMENTAS_QUE_GRAVAM
+            .iter()
+            .any(|f| crate::ferramentas::nome_completo(f) == ferramenta)
+}
+
+/// O matcher do hook `PreToolUse`: tudo que pede licença, nativo e MCP, no
+/// formato de alternativa que o Claude Code espera.
+pub fn matcher_do_hook() -> String {
+    let mut nomes: Vec<String> =
+        FERRAMENTAS_QUE_PEDEM_LICENCA.iter().map(|s| s.to_string()).collect();
+    nomes.extend(
+        crate::ferramentas::FERRAMENTAS_QUE_GRAVAM
+            .iter()
+            .map(|f| crate::ferramentas::nome_completo(f)),
+    );
+    nomes.join("|")
+}
+
 // ------------------------------------------------------------- pendências
 
 /// Os pedidos parados esperando gente. Vive fora do banco porque o que está
@@ -179,7 +215,7 @@ pub fn avaliar(
     // Ler não pede licença. Sem isto o agente pararia a cada arquivo aberto e
     // o card viraria ruído — e um card que vira ruído é um card que o usuário
     // aprova sem ler.
-    if !FERRAMENTAS_QUE_PEDEM_LICENCA.contains(&pedido.ferramenta.as_str()) {
+    if !pede_licenca(&pedido.ferramenta) {
         return Ok(Veredito::permitir("Leitura não precisa de aprovação."));
     }
 
@@ -294,7 +330,11 @@ fn previa_do_conteudo(argumentos: &serde_json::Value) -> Option<String> {
     let bruto = argumentos
         .get("content")
         .or_else(|| argumentos.get("new_string"))
-        .or_else(|| argumentos.get("command"))?
+        .or_else(|| argumentos.get("command"))
+        // O nome que as ferramentas do §6 usam. Sem esta linha o card das
+        // escritas por MCP viria sem prévia — e um card sem prévia é um card
+        // que se aprova sem ler.
+        .or_else(|| argumentos.get("conteudo"))?
         .as_str()?;
     if bruto.chars().count() <= TETO {
         return Some(bruto.to_string());
@@ -318,9 +358,13 @@ impl Barramento {
     ///
     /// Porta fixa daria conflito entre duas cópias do app e, pior, deixaria
     /// um alvo previsível para qualquer coisa rodando na mesma máquina.
+    ///
+    /// Recebe o orquestrador inteiro, e não só as `aprovacoes`, porque desde o
+    /// M3 o barramento também serve o MCP — e as ferramentas do §6 precisam de
+    /// quem enfileira turno e carrega recado entre nós.
     pub fn subir(
         banco: Arc<Mutex<Banco>>,
-        aprovacoes: Arc<Aprovacoes>,
+        orq: Arc<crate::orquestrador::Orquestrador>,
         sink: Sink,
     ) -> Resultado<Barramento> {
         let servidor = tiny_http::Server::http("127.0.0.1:0")
@@ -331,16 +375,19 @@ impl Barramento {
             .ok_or_else(|| Erro::invalido("barramento sem porta"))?
             .port();
 
-        let devolve = Barramento { porta, aprovacoes: aprovacoes.clone() };
+        let aprovacoes = orq.aprovacoes();
+        let devolve = Barramento { porta, aprovacoes };
 
         std::thread::spawn(move || {
             for pedido in servidor.incoming_requests() {
                 // Uma thread por pedido: cada um pode ficar meia hora parado
-                // esperando um clique, e um laço único travaria o próximo.
+                // esperando um clique — ou, num `enviar_para`, esperando outro
+                // nó terminar o turno. Um laço único travaria o próximo, e o
+                // próximo é justamente o turno pelo qual este espera.
                 let banco = banco.clone();
-                let aprovacoes = aprovacoes.clone();
+                let orq = orq.clone();
                 let sink = sink.clone();
-                std::thread::spawn(move || atender(pedido, banco, aprovacoes, sink));
+                std::thread::spawn(move || atender(pedido, banco, orq, sink));
             }
         });
 
@@ -351,8 +398,19 @@ impl Barramento {
         self.porta
     }
 
+    /// A raiz. É isto que vai para o `ContextoSessao`; os dois caminhos saem
+    /// dela, para não existir um lugar que saiba a porta e outro que saiba o
+    /// caminho.
+    pub fn url_base(&self) -> String {
+        format!("http://127.0.0.1:{}", self.porta)
+    }
+
     pub fn url_de_aprovacao(&self) -> String {
-        format!("http://127.0.0.1:{}/aprovacao", self.porta)
+        format!("{}/aprovacao", self.url_base())
+    }
+
+    pub fn url_do_mcp(&self) -> String {
+        format!("{}/mcp", self.url_base())
     }
 
     pub fn aprovacoes(&self) -> &Arc<Aprovacoes> {
@@ -363,25 +421,38 @@ impl Barramento {
 fn atender(
     mut pedido: tiny_http::Request,
     banco: Arc<Mutex<Banco>>,
-    aprovacoes: Arc<Aprovacoes>,
+    orq: Arc<crate::orquestrador::Orquestrador>,
     sink: Sink,
 ) {
     let token = pedido
         .headers()
         .iter()
+        // `equiv` compara sem caixa, e isso importa: medido na CLI 2.1.251, o
+        // cabeçalho chega como `x-mutirao-token`, todo minúsculo.
         .find(|h| h.field.equiv(CABECALHO_TOKEN))
         .map(|h| h.value.as_str().to_string())
         .unwrap_or_default();
 
+    // O caminho vem com query string quando há; só o começo interessa.
+    let caminho = pedido.url().split('?').next().unwrap_or("").to_string();
+
     let mut corpo = String::new();
     let _ = std::io::Read::read_to_string(pedido.as_reader(), &mut corpo);
 
-    let resposta = tratar(&banco, &aprovacoes, &sink, &token, &corpo, PRAZO_APROVACAO);
-    let (codigo, texto) = match resposta {
-        Ok(v) => (200, v.como_json().to_string()),
-        // 403 sem explicação: quem mandou um token ruim não descobre por aqui
-        // se ele existia, nem o que existe do outro lado.
-        Err(_) => (403, "{}".to_string()),
+    let (codigo, texto) = match caminho.as_str() {
+        "/aprovacao" => {
+            match tratar(&banco, orq.aprovacoes_ref(), &sink, &token, &corpo, PRAZO_APROVACAO) {
+                Ok(v) => (200, v.como_json().to_string()),
+                // 403 sem explicação: quem mandou um token ruim não descobre
+                // por aqui se ele existia, nem o que existe do outro lado.
+                Err(_) => (403, "{}".to_string()),
+            }
+        }
+        "/mcp" => {
+            let r = crate::mcp::tratar(&orq, &banco, &token, &corpo);
+            (r.codigo, r.corpo)
+        }
+        _ => (404, "{}".to_string()),
     };
 
     let cabecalho = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
