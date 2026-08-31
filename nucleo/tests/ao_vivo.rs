@@ -305,3 +305,214 @@ fn ler_nao_abre_card() {
         b.pedidos.lock().unwrap()
     );
 }
+
+// ==================================================================== M3 ===
+// "Pesquisador entrega ao Redator sem eu tocar, e um ciclo A→B→A encerra
+// sozinho sem travar o app" — o critério de pronto do M3, medido do único
+// jeito que conta: com dois processos do Claude Code de verdade, um falando
+// com o outro pelo servidor MCP do barramento.
+
+/// Dois agentes ligados por `fala_com`, com o barramento no ar.
+struct Dupla {
+    banco: Arc<Mutex<Banco>>,
+    orq: Arc<Orquestrador>,
+    a: String,
+    b: String,
+    a_no: String,
+    b_no: String,
+    recados: Arc<Mutex<Vec<(String, String)>>>,
+    pasta: std::path::PathBuf,
+    _barramento: Barramento,
+}
+
+fn dupla() -> Dupla {
+    let pasta = std::env::temp_dir().join(format!("mutirao-ponte-{}", nucleo::novo_id()));
+    std::fs::create_dir_all(&pasta).unwrap();
+    std::fs::write(
+        pasta.join("contrato.txt"),
+        "O prazo do contrato é de 18 meses, com reajuste anual pelo IGP-M.\n",
+    )
+    .unwrap();
+
+    let banco = Banco::em_memoria().unwrap();
+    let ws = banco.criar_workspace("Ponte", pasta.to_str().unwrap()).unwrap();
+    let a = banco.criar_no(&ws.id, TipoNo::Agente, "Pesquisador", 0.0, 0.0).unwrap();
+    let b = banco.criar_no(&ws.id, TipoNo::Agente, "Redator", 400.0, 0.0).unwrap();
+    banco.criar_cabo(&ws.id, &a.id, &b.id, nucleo::TipoCabo::FalaCom).unwrap();
+    let banco = Arc::new(Mutex::new(banco));
+
+    let recados: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let copia = recados.clone();
+    let sink: Sink = Arc::new(move |e| {
+        if let EventoNucleo::NoMensagem { de_node, para_node, .. } = e {
+            copia.lock().unwrap().push((de_node, para_node));
+        }
+    });
+
+    let fabrica: Arc<dyn Fabrica> = Arc::new(FabricaClaude::nova());
+    let orq = Arc::new(Orquestrador::novo(banco.clone(), fabrica, sink.clone()));
+    let barramento = Barramento::subir(banco.clone(), orq.clone(), sink).unwrap();
+    orq.ligar_barramento(barramento.url_base());
+
+    let sa = orq.abrir_sessao(&a.id, Adaptador::Claude).unwrap();
+    let sb = orq.abrir_sessao(&b.id, Adaptador::Claude).unwrap();
+
+    Dupla {
+        banco,
+        orq,
+        a: sa.id,
+        b: sb.id,
+        a_no: a.id,
+        b_no: b.id,
+        recados,
+        pasta,
+        _barramento: barramento,
+    }
+}
+
+impl Dupla {
+    fn estado(&self, sessao: &str) -> EstadoSessao {
+        self.banco.lock().unwrap().obter_sessao(sessao).unwrap().estado
+    }
+
+    /// Espera os DOIS nós pararem. Um só parado não prova nada: o outro pode
+    /// estar pendurado esperando, que é justamente a falha a evitar.
+    fn esperar_os_dois(&self, limite: Duration) -> bool {
+        let inicio = Instant::now();
+        while inicio.elapsed() < limite {
+            let parado = |e| matches!(e, EstadoSessao::Ocioso | EstadoSessao::Erro);
+            if parado(self.estado(&self.a)) && parado(self.estado(&self.b)) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        false
+    }
+
+    fn conversa(&self, sessao: &str) -> Vec<nucleo::Mensagem> {
+        self.banco.lock().unwrap().historico(sessao, 50).unwrap()
+    }
+}
+
+impl Drop for Dupla {
+    fn drop(&mut self) {
+        self.orq.encerrar_tudo();
+        let _ = std::fs::remove_dir_all(&self.pasta);
+    }
+}
+
+#[test]
+#[ignore = "gasta token e precisa do Claude Code instalado"]
+fn o_pesquisador_entrega_ao_redator_sem_eu_tocar() {
+    let d = dupla();
+    d.orq
+        .enviar(
+            &d.a,
+            "Leia contrato.txt. Depois use a ferramenta enviar_para para pedir ao nó \
+             Redator que escreva uma frase de aviso sobre o reajuste, e me devolva a \
+             frase que ele responder. Não escreva a frase você mesmo.",
+        )
+        .unwrap();
+
+    assert!(
+        d.esperar_os_dois(Duration::from_secs(420)),
+        "os nós não pararam: Pesquisador em {:?}, Redator em {:?}",
+        d.estado(&d.a),
+        d.estado(&d.b)
+    );
+
+    // 1. O recado atravessou, e a interface soube — é o que anima o cabo.
+    let recados = d.recados.lock().unwrap().clone();
+    println!("recados: {recados:?}");
+    assert!(
+        recados.iter().any(|(de, para)| de == &d.a_no && para == &d.b_no),
+        "nenhum recado do Pesquisador para o Redator"
+    );
+
+    // 2. O Redator recebeu como recado de nó, com a origem e a cadeia — não
+    //    como se o usuário tivesse falado com ele.
+    let dele = d.conversa(&d.b);
+    let pedido = dele
+        .iter()
+        .find(|m| m.papel == PapelMensagem::No)
+        .expect("o Redator não recebeu recado nenhum");
+    println!("o Redator recebeu: {}", pedido.conteudo);
+    assert_eq!(pedido.origem_node.as_deref(), Some(d.a_no.as_str()));
+    let cadeia = pedido.trace_id.clone().expect("recado sem cadeia");
+
+    // 3. O Redator trabalhou de verdade.
+    let resposta = dele
+        .iter()
+        .rev()
+        .find(|m| m.papel == PapelMensagem::Agente)
+        .expect("o Redator não respondeu");
+    println!("o Redator respondeu: {}", resposta.conteudo);
+    assert!(!resposta.conteudo.trim().is_empty());
+
+    // 4. E a resposta dele voltou para a conversa do Pesquisador, na MESMA
+    //    cadeia — é por ela que o orçamento soma os dois lados.
+    let minha = d.conversa(&d.a);
+    let final_ = minha
+        .iter()
+        .rev()
+        .find(|m| m.papel == PapelMensagem::Agente)
+        .expect("o Pesquisador não respondeu");
+    println!("o Pesquisador entregou: {}", final_.conteudo);
+    assert_eq!(final_.trace_id.as_deref(), Some(cadeia.as_str()), "a cadeia se perdeu no caminho");
+
+    let gasto = d.banco.lock().unwrap().custo_do_trace(&cadeia).unwrap();
+    println!("a cadeia inteira custou US$ {gasto:.6}");
+    assert!(gasto > 0.0, "o custo por cadeia não somou os dois nós");
+}
+
+#[test]
+#[ignore = "gasta token e precisa do Claude Code instalado"]
+fn um_ciclo_entre_dois_nos_encerra_sozinho() {
+    // A outra metade do critério: "sem travar o app". Aqui os dois são
+    // instruídos a perguntar um ao outro — que é o pior caso, a espera
+    // cruzada. Tem de acabar depressa, não no prazo.
+    //
+    // O que este teste NÃO garante é qual limite desatou. O modelo pode muito
+    // bem responder em vez de perguntar de volta, e aí a espera cruzada nem
+    // acontece (foi o que deu na primeira execução: 21 s, o Redator devolveu
+    // perguntas em texto em vez de chamar `enviar_para`). A prova determinística
+    // da detecção de ciclo é o teste offline
+    // `dois_nos_esperando_um_pelo_outro_nao_travam_o_app`, que usa um adaptador
+    // teimoso e falha se a checagem for removida. Aqui a pergunta é outra, e é
+    // a que só a CLI de verdade responde: com dois processos de verdade
+    // conversando, o app trava?
+    let d = dupla();
+    d.orq
+        .enviar(
+            &d.a,
+            "Use a ferramenta enviar_para e pergunte ao nó Redator qual é a opinião \
+             DELE sobre o contrato. Peça que ele também consulte você antes de \
+             responder. Depois me conte o que aconteceu.",
+        )
+        .unwrap();
+
+    let inicio = Instant::now();
+    assert!(
+        d.esperar_os_dois(Duration::from_secs(420)),
+        "travou: Pesquisador em {:?}, Redator em {:?}",
+        d.estado(&d.a),
+        d.estado(&d.b)
+    );
+    println!("a cadeia encerrou em {:?}", inicio.elapsed());
+
+    // O prazo padrão de uma mensagem é de dez minutos. Se foi o prazo que
+    // desatou isto, não encerrou sozinho — expirou.
+    assert!(
+        inicio.elapsed() < Duration::from_secs(400),
+        "só destravou perto do prazo; o limite não pegou"
+    );
+
+    let minha = d.conversa(&d.a);
+    for m in &minha {
+        println!("[{:?}] {}", m.papel, m.conteudo.chars().take(200).collect::<String>());
+    }
+    assert!(
+        minha.iter().any(|m| m.papel == PapelMensagem::Agente),
+        "o Pesquisador não chegou a responder nada"
+    );
+}

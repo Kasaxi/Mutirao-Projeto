@@ -307,6 +307,25 @@ com o mesmo token.
 **Pronto quando:** Pesquisador entrega ao Redator sem eu tocar, e um ciclo A→B→A encerra sozinho
 sem travar o app.
 
+**Pronto.** Com **dois** processos do Claude Code de verdade: o Pesquisador leu o contrato, chamou
+`enviar_para`, o Redator escreveu a frase e a resposta voltou — 17 segundos, US$ 0,088 na cadeia
+inteira. As dez ferramentas do §6 subiram como servidor MCP no mesmo barramento do M2, e as duas que
+gravam passam pelo mesmo card: medido, o hook `PreToolUse` dispara para ferramenta MCP também, e
+negado o `tools/call` nunca chega ao servidor.
+
+Três correções ao que está escrito acima:
+
+1. **Os três limites eram quatro.** Saltos, prazo e orçamento não pegam a espera cruzada — A parado
+   esperando B enquanto B pergunta de volta a A. Saltos só contam quando alguém anda; orçamento só
+   soma quando alguém gasta; o prazo pega em dez minutos, que é travar. Foi preciso seguir a corrente
+   de quem-espera-quem e recusar na hora. Ver `ESPECIFICACAO.md §5`.
+2. **A fila substituiu a recusa.** O §5 dizia que o nó ocupado recusa turno novo. Isso valia quando
+   só o usuário falava com ele; com outro nó do outro lado, recusar é perder trabalho em silêncio.
+   Agora quem chega no meio espera a vez, em ordem.
+3. **O adaptador Codex ficou de fora**, por falta da CLI na máquina. A ponte é agnóstica por
+   construção — quem carrega recado é o `Orquestrador`, e o adaptador só emite `EventoAgente` —, mas
+   isso é argumento, não prova, e o item pedia prova.
+
 ### M4 — Times · 2 semanas
 - Papéis com prompt, ferramentas e nível de autonomia; biblioteca de papéis prontos
 - Maestro Mode: `recrutar` e `dispensar`; partituras salvas e reabertas

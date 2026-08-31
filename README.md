@@ -3,12 +3,19 @@
 Orquestrador de agentes de IA num canvas infinito, para trabalho geral — não só
 código. Windows 11, Tauri 2 + React.
 
-**Estado: M0, M1 e M2 prontos.** Canvas com pan e zoom, nós arrastáveis e
+**Estado: M0 a M3 prontos.** Canvas com pan e zoom, nós arrastáveis e
 redimensionáveis, cabos entre eles, tudo persistido em SQLite (M0). Nó de agente
 conversando com o **Claude Code de verdade**: face conversa e face terminal,
 turno com cancelamento, ações como cards, retomada da sessão e custo por turno e
 por workspace (M1). Notas que viram `.md` na sua pasta, árvore de arquivos de
-verdade, e o agente gravando **só depois de você aprovar** (M2).
+verdade, e o agente gravando **só depois de você aprovar** (M2). E agora um
+agente **fala com outro**: o Pesquisador pede ao Redator e devolve a resposta,
+sem você tocar (M3).
+
+> **Um nó só enxerga o que os cabos deixam.** Ligou `fala_com`? Pode mandar
+> recado. Não ligou? Aquele nó **não existe** — e a mensagem de erro é a mesma
+> de um nó que nunca existiu, para tentativa nenhuma virar sonda do seu canvas.
+> Quando dois nós conversam, o cabo acende: a ponte é visível, não mágica.
 
 > **Nada é gravado sem o seu clique.** Antes de escrever qualquer arquivo ou
 > rodar qualquer comando, o agente para num card que mostra o quê e quanto —
@@ -32,10 +39,11 @@ MUTIRAO_CLAUDE_BIN=...  npm run app   # CLI fora do PATH (comum no Windows)
 Testes:
 
 ```bash
-cargo test -p nucleo        # 69 testes, offline e de graça
-node testes-ui/fumaca.mjs   # 36 verificações da interface no Chromium
+cargo test -p nucleo        # 92 testes, offline e de graça
+node testes-ui/fumaca.mjs   # 46 verificações da interface no Chromium
 
 # Estes gastam token e precisam da CLI instalada. Rode ao subir de versão dela.
+# Os dois do M3 sobem DOIS Claude Code ao mesmo tempo, um falando com o outro.
 cargo test -p nucleo --test ao_vivo -- --ignored --nocapture
 ```
 
@@ -58,7 +66,7 @@ janela, IPC e a tradução de evento do núcleo em evento de janela. O front
 
 Essa separação existe por um motivo prático: `cargo test -p nucleo` roda em
 qualquer máquina, sem as dependências de sistema do Tauri — e é onde estão os
-43 testes, inclusive os de turno completo.
+92 testes, inclusive os de turno completo e os da ponte entre nós.
 
 O adaptador falso (`nucleo/src/agente.rs`) não é conveniência de teste: testar
 orquestração contra a API de verdade é lento, caro e não-determinístico. Ele lê
@@ -67,7 +75,16 @@ um roteiro e emite exatamente os mesmos eventos que o adaptador Claude
 
 O barramento (`nucleo/src/barramento.rs`) é um servidor em `127.0.0.1` com
 escopo por token: token → sessão → nó → workspace. É por ele que o agente pede
-licença, e é ele que segura a chamada enquanto o card espera um clique.
+licença, e é ele que segura a chamada enquanto o card espera um clique. Desde o
+M3 ele também serve o MCP (`nucleo/src/mcp.rs`) em `/mcp` — mesma porta, mesmo
+token, mesmo processo. Um segundo canal seria um segundo escopo para manter em
+dia, e escopo mantido em dois lugares diverge.
+
+As ferramentas que o agente enxerga estão em `nucleo/src/ferramentas.rs`, e o
+que cada uma alcança é decidido pelos cabos. Duas delas gravam em disco, e as
+duas passam pelo **mesmo card do M2**: medido na CLI 2.1.251, o hook
+`PreToolUse` dispara para ferramenta MCP também, e negado o `tools/call` nunca
+chega ao servidor. Não é gravar e desfazer — não chega a gravar.
 
 Três coisas que a medição decidiu, e que estão explicadas em
 `ESPECIFICACAO.md §9`: o Claude roda pela **CLI headless**, sem sidecar Node; o
@@ -75,6 +92,13 @@ Três coisas que a medição decidiu, e que estão explicadas em
 que ignora cache erra por quase 12 vezes; e a aprovação sai por um **hook
 `PreToolUse` do tipo HTTP**, porque o `--permission-prompt-tool` que o plano
 previa não existe mais.
+
+Uma quarta, que só apareceu escrevendo o M3: os três limites do plano — saltos,
+prazo e orçamento — não pegam a **espera cruzada**, quando A está parado
+esperando B e B pergunta de volta a A. Saltos só contam quando alguém anda,
+orçamento só soma quando alguém gasta, e o prazo pega em dez minutos, que para
+quem está olhando a tela é travar. Por isso o orquestrador segue a corrente de
+quem-espera-quem e recusa na hora, dizendo ao modelo o que fazer em vez disso.
 
 ## Licença e uso
 

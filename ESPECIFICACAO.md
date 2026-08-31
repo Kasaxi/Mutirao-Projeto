@@ -197,7 +197,12 @@ depender só do nome do evento.
 | `custo:atualizado` | `{ tipo, workspace_id, total, por_no }` | fim de turno | pronto |
 | `aprovacao:pedida` | `{ tipo, pedido: PedidoAprovacao }` | ferramenta exige aprovação | pronto |
 | `aprovacao:decidida` | `{ tipo, tool_call_id, node_id, decisao, decidido_por }` | alguém (ou uma regra) decidiu | pronto |
-| `no:mensagem` | `{ de_node, para_node, trace_id }` | mensagem entre nós, para animar o cabo | M3 |
+| `no:mensagem` | `{ tipo, de_node, para_node, trace_id, tipo_mensagem }` | mensagem entre nós, para animar o cabo | pronto |
+| `cadeia:encerrada` | `{ tipo, trace_id, node_id, motivo }` | uma cadeia bateu num limite | pronto |
+
+O campo é `tipo_mensagem`, e não `tipo` como a tabela antiga dizia: `tipo` já é
+o discriminante do envelope, e o serde recusa o homônimo em tempo de
+compilação. Vale como lembrete de que o discriminante ocupa um nome no JSON.
 
 Regra: evento **notifica**, não carrega o histórico. O front pede o que
 precisa por comando. Isso evita que a fronteira IPC vire um firehose.
@@ -286,20 +291,59 @@ ler_nota   { nota: string } -> { conteudo: string }
 escrever_nota { nota: string, conteudo: string, modo: "substituir"|"acrescentar" }
              -> { bytes: number }
 
-listar_arquivos { caminho?: string } -> { itens: { nome, tipo, tamanho }[] }
-ler_arquivo     { caminho: string } -> { conteudo: string, truncado: boolean }
+listar_nos {} -> { nos: { nome, tipo, relacao }[] }
+
+listar_arquivos { caminho?: string } -> { itens: { caminho, nome, pasta, tamanho }[] }
+ler_arquivo     { caminho: string } -> { conteudo: string }
 escrever_arquivo { caminho: string, conteudo: string } -> { bytes: number }
 
-recrutar { papel: string, nome: string } -> { no: string }
-dispensar { no: string } -> { encerrado: true }
+recrutar { papel: string, nome: string } -> { no: string }      // M4
+dispensar { no: string } -> { encerrado: true }                  // M4
 
 perguntar_humano { pergunta: string, opcoes?: string[] } -> { resposta: string }
 concluir { resumo: string } -> { ok: true }
 ```
 
+Implementadas em `nucleo/src/ferramentas.rs`; `recrutar` e `dispensar` ficam
+para o M4, junto com os times. Duas diferenças em relação ao rascunho acima, e
+as duas nasceram de escrever o código:
+
+- `ler_arquivo` perdeu o `truncado`. Ele prometia o que a implementação não
+  entrega: `arquivos::ler_texto` **recusa** um arquivo grande demais em vez de
+  cortá-lo pela metade, porque meio arquivo é pior que erro nenhum — o modelo
+  não tem como saber que leu metade.
+- `listar_nos` não estava na lista e precisa estar. Sem ela o agente descobre
+  os vizinhos por tentativa e erro, e cada tentativa é uma sonda.
+
 O agente endereça vizinhos **por nome**, não por id: id é detalhe interno e
 convida a erro de cópia. A resolução nome → id acontece dentro do conjunto
 visível, e nome ambíguo é erro explícito.
+
+### Como as ferramentas chegam ao modelo
+
+Um servidor MCP JSON-RPC 2.0 no barramento, em `/mcp` — mesma porta, mesmo
+token e mesmo processo do hook de aprovação. Um segundo canal seria um segundo
+escopo para manter em dia, e escopo mantido em dois lugares diverge.
+
+O nome que o modelo vê leva o prefixo do servidor: `mcp__mutirao__enviar_para`.
+No `tools/call` ele chega **sem** o prefixo — isso é coisa do lado do cliente.
+
+Medido contra a CLI 2.1.251, com uma sonda que registrava tudo:
+
+1. `server/discover` — **antes** do handshake, e não é do MCP: é sondagem da
+   própria CLI. O `id` dela é a string `"server-discover-probe-1"`, não um
+   número, e é por isso que o `id` trafega como valor JSON sem conversão.
+2. `initialize`, pedindo `protocolVersion` `"2025-11-25"`. Devolvemos a versão
+   que ele pediu.
+3. `notifications/initialized` — sem `id`, e portanto sem resposta: 202 e corpo
+   vazio. Responder a uma notificação é erro de protocolo.
+4. `tools/list`, depois `tools/call`. O `params._meta` traz
+   `claudecode/toolUseId`, que é o mesmo `tool_use_id` do hook e do stream.
+
+Erro de ferramenta volta como resultado com `isError: true`, não como erro de
+JSON-RPC. A diferença importa: erro de protocolo o cliente engole; resultado
+com erro o **modelo lê** — e "esse nó não existe" é o que ele precisa ler para
+corrigir o rumo sozinho.
 
 ### Envelope entre nós
 
@@ -317,9 +361,35 @@ visível, e nome ambíguo é erro explícito.
 }
 ```
 
-Limites do host, não do agente: **6 saltos**, prazo por mensagem, orçamento de
-tokens por `trace`. Estourou qualquer um: a cadeia encerra, quem pediu recebe
-erro, e o usuário vê um aviso — nunca um silêncio.
+Limites do host, não do agente: **6 saltos**, prazo por mensagem (padrão 10
+min, teto 30), orçamento de **US$ 1,00 por `trace`**. Estourou qualquer um: a
+cadeia encerra, quem pediu recebe erro, e o usuário vê um aviso
+(`cadeia:encerrada`) — nunca um silêncio.
+
+### O quarto limite, que o plano não previa: a espera cruzada
+
+Os três acima não cobrem o caso pior. A saber: A manda um `pedido` a B e fica
+em `aguardando_no`; B, no turno dele, manda um `pedido` de volta a A. Nenhum dos
+dois pode andar.
+
+Não é o ciclo A→B→A que o `ARQUITETURA.md §6` chama de legítimo — lá o Redator
+**termina o turno** e só então o Pesquisador volta a falar. Aqui ninguém
+termina nada. E os limites não pegam:
+
+- **Saltos** não contam, porque saltos só avançam quando alguém consegue andar.
+- **Orçamento** não soma, porque ninguém está gastando: os dois estão parados.
+- **Prazo** pega — em dez minutos. Dez minutos com dois nós congelados é
+  exatamente o travamento que o M3 promete não ter.
+
+Então `Orquestrador::entregar` segue a corrente de quem-espera-quem antes de
+enfileirar um `pedido`, e recusa na hora se ela voltar a quem está mandando. O
+erro é escrito para o modelo saber o que fazer: *"o nó X está parado esperando
+a SUA resposta — perguntar de volta agora trava os dois. Responda com o que
+você já tem."* Um `aviso` passa: ele não espera ninguém.
+
+O teste `dois_nos_esperando_um_pelo_outro_nao_travam_o_app` usa dois adaptadores
+teimosos, que só sabem perguntar. Ele foi verificado ao contrário — com a
+checagem desligada, os dois nós travam e o teste falha.
 
 ---
 
@@ -339,6 +409,30 @@ por teste. Transição fora desta tabela é bug do orquestrador.
 
 Pedem atenção do usuário (ponto vermelho no nó): `aguardando_aprovacao`,
 `aguardando_humano`, `erro`. "Pensando" não é pedido de socorro.
+
+Duas transições que a tabela não prevê e o M3 precisou, com
+`Banco::forcar_estado_sessao` — método separado, e com esse nome, para
+qualquer uso aparecer na busca:
+
+- **`aguardando_no` → `ocioso`**, ao cancelar. Passar por `erro` seria mentir
+  sobre o que houve: o usuário mandou parar, não deu problema.
+- **qualquer coisa → `erro`**, quando o adaptador morre no meio. Deixar o nó
+  "pensando" para sempre é o pior desfecho possível: não pede atenção, não
+  aceita turno novo e não explica nada.
+
+Fora desses dois, a checagem continua valendo — é ela que impede o orquestrador
+de gravar um estado impossível.
+
+### Um turno por vez por nó — e uma fila para quem chega no meio
+
+Continua sendo um turno por vez. O que mudou no M3 foi o desfecho de quem
+chega durante um: **fila, em ordem de chegada**, em vez de recusa. Recusar era
+defensável quando só o usuário falava com o nó — ele vê a recusa e tenta de
+novo. Com outro nó do outro lado, recusar é perder trabalho em silêncio.
+
+Quem termina um turno puxa o próximo da fila. Sem essa linha, uma mensagem
+enfileirada esperaria até alguém falar de novo com o nó, que é como um recado
+se perde sem dar erro.
 
 ---
 
@@ -405,9 +499,9 @@ Nenhuma palavra de Git aparece. Binário não faz merge: escolhe-se um lado.
 
 | Camada | Como | Cobre |
 |---|---|---|
-| Núcleo | `cargo test -p nucleo` — 69 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras |
-| Interface | `node testes-ui/fumaca.mjs` — 36 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; um turno de ponta a ponta; o card de aprovação com aprovar, negar e "não perguntar de novo"; nota em arquivo e árvore da pasta |
-| Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` — 8 testes | o Claude Code de verdade: lê, responde, cobra, retoma, reporta erro com a frase certa, grava depois de aprovado, **não** grava quando negado e **não** grava sem barramento |
+| Núcleo | `cargo test -p nucleo` — 92 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras, handshake do MCP, ponte entre nós, fila e os limites |
+| Interface | `node testes-ui/fumaca.mjs` — 46 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; um turno de ponta a ponta; o card de aprovação com aprovar, negar e "não perguntar de novo"; nota em arquivo e árvore da pasta; o cabo acendendo e o recado chegando ao outro nó com o nome de quem pediu |
+| Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` — 10 testes | o Claude Code de verdade: lê, responde, cobra, retoma, reporta erro com a frase certa, grava depois de aprovado, **não** grava quando negado, **não** grava sem barramento — e, com **dois** processos, entrega de um nó a outro e encerra a cadeia sem travar |
 
 **Duas pastas parecidas, de propósito.** `nucleo/testes/` guarda fixtures (nome
 em português, como o resto); `nucleo/tests/` é a pasta que o Cargo exige em
@@ -431,7 +525,7 @@ um espelho em `src/lib/ipc.ts` para o modo navegador, que não tem Rust por
 baixo. A duplicação é conhecida e vale o preço: sem ela não dá para desenvolver
 nem testar a interface fora do Tauri.
 
-Três testes valem por si, porque cobrem coisa que falha calada:
+Alguns testes valem por si, porque cobrem coisa que falha calada:
 
 - `o_token_do_mcp_nunca_sai_no_json_da_sessao` — o segredo do §4 atravessando a
   fronteira seria a falha de segurança mais barata de cometer e a mais difícil
@@ -445,6 +539,15 @@ Três testes valem por si, porque cobrem coisa que falha calada:
   e ainda assim escapa. Só resolver o caminho de verdade pega os dois casos.
 - `sem_barramento_o_agente_nao_consegue_gravar` (ao vivo) — se este passar a
   criar o arquivo, a aprovação virou enfeite.
+- `as_ferramentas_que_gravam_pedem_card_com_o_nome_completo` — se
+  `escrever_nota` escapasse do matcher do hook, o barramento seria uma porta
+  dos fundos para exatamente o que o card existe para impedir.
+- `no_sem_cabo_simplesmente_nao_existe` — a frase precisa ser a **mesma** para
+  o nó desligado e para o inexistente. Duas mensagens diferentes fazem de cada
+  tentativa uma sonda que mapeia o canvas inteiro.
+- `dois_nos_esperando_um_pelo_outro_nao_travam_o_app` — verificado ao contrário:
+  com a detecção de ciclo desligada, os dois nós travam e o teste falha. Um
+  teste de "não trava" que nunca foi visto falhando não prova nada.
 
 Um teste que passou merece um comentário no código quando o motivo dele não é
 óbvio. Dois exemplos já no repositório: o `overflow` do nó, que tornava a porta
@@ -737,13 +840,19 @@ pronto do `ARQUITETURA.md`.
   aparece, o arquivo **não existe** enquanto ele está aberto, e passa a existir
   depois do clique.
 
-### O que ficou de fora do M2, com intenção
+- **M3** — *o Pesquisador entrega ao Redator sem eu tocar, e um ciclo A→B→A
+  encerra sozinho sem travar o app.* Funciona. Medido com **dois** processos do
+  Claude Code de verdade em `o_pesquisador_entrega_ao_redator_sem_eu_tocar`: o
+  recado atravessa em 17 segundos, o Redator responde, a resposta volta na
+  mesma cadeia, e a cadeia inteira custou US$ 0,088.
 
-1. **As ferramentas de trabalho do §6.** `ler_nota`, `escrever_nota`,
-   `listar_arquivos` e companhia ainda não existem como ferramentas MCP: o
-   agente usa as nativas do Claude Code (`Read`, `Write`), que já ficam
-   confinadas à pasta. O barramento está de pé e com escopo por token — falta
-   pendurar as ferramentas nele, e isso anda junto com o `enviar_para` do M3.
+### O que ficou de fora do M3, com intenção
+
+1. **Adaptador Codex.** O plano previa fazê-lo no M3 "para provar que a ponte é
+   agnóstica". A ponte é agnóstica por construção — quem fala com outro nó é o
+   `Orquestrador`, e o adaptador só emite `EventoAgente` —, mas isso é
+   argumento, não prova, e a prova exige a CLI do Codex instalada. Fica para
+   quando ela estiver na máquina.
 2. **Face terminal com histórico.** Ela mostra o fluxo cru a partir do turno
    seguinte, porque o fluxo não é gravado — só o que ele produz.
 3. **Modelo por papel.** O adaptador não passa `--model`: segue o que a CLI do
@@ -754,22 +863,29 @@ pronto do `ARQUITETURA.md`.
    `Documentos/Mutirão/<nome>`. Um seletor de pasta exige o plugin de diálogo
    do Tauri; é uma tela, não uma decisão de arquitetura.
 
-### Começando o M3
+### Começando o M4
 
-O M3 é *"Pesquisador entrega ao Redator sem eu tocar, e um ciclo A→B→A encerra
-sozinho sem travar o app"*. O que o M2 deixa pronto:
+O M4 é *"três agentes trabalham numa entrega e eu só leio o resultado"*. O que
+o M3 deixa pronto:
 
-1. O barramento já sobe, já resolve token → sessão → nó e já segura uma
-   chamada até alguém responder. `enviar_para` é o mesmo mecanismo com outro
-   destinatário: em vez de esperar um humano, espera outro nó.
-2. `EstadoSessao::AguardandoNo` já existe na máquina de estados, com teste.
-3. `message.trace_id` e `message.origem_node` já estão no esquema desde a 001 —
-   a cadeia entre nós tem onde ser gravada sem migration nenhuma.
+1. A ponte inteira: `enviar_para`, `avisar`, a fila por nó, os limites e o
+   escopo pelos cabos. Um time é isso rodando com mais nós, não um mecanismo
+   novo.
+2. O servidor MCP já está de pé com escopo por token. `recrutar` e `dispensar`
+   entram no mesmo `ferramentas::catalogo()`, com a mesma execução.
+3. `EventoNucleo::NoMensagem` já anima o cabo, e o front já sabe montar a
+   conversa de um nó com quem falou.
 
-O que precisa nascer: as ferramentas MCP do §6 penduradas no barramento
-(`--mcp-config` em vez de `--strict-mcp-config` sozinho), a fila de um turno
-por nó, e os três limites que impedem o ciclo infinito — 6 saltos, prazo por
-mensagem e orçamento de tokens por trace.
+O que precisa nascer: a tabela `role` de verdade (papel, prompt de sistema,
+modelo por papel — o adaptador ainda não passa `--model`), a criação de nó por
+ferramenta, e um jeito de o usuário ver um time como uma coisa só em vez de
+três nós soltos no canvas.
 
-Escreva um roteiro novo para o adaptador falso no mesmo dia — é ele que mantém
+Um cuidado que o M3 comprou caro e vale carregar: **um agente que cria outro
+agente é um limite novo**. Os três de hoje incidem sobre a cadeia; nenhum deles
+impede um nó de recrutar dez. Antes de `recrutar` existir, decida quem paga a
+conta e quem para o crescimento — pelo mesmo motivo que a espera cruzada
+precisou de checagem própria: o limite que ninguém previu é o que trava o app.
+
+Escreva o roteiro novo para o adaptador falso no mesmo dia — é ele que mantém
 o custo de cada iteração em zero.
