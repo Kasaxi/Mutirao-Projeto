@@ -3,14 +3,16 @@
 Orquestrador de agentes de IA num canvas infinito, para trabalho geral — não só
 código. Windows 11, Tauri 2 + React.
 
-**Estado: M0 a M3 prontos.** Canvas com pan e zoom, nós arrastáveis e
+**Estado: M0 a M4 prontos.** Canvas com pan e zoom, nós arrastáveis e
 redimensionáveis, cabos entre eles, tudo persistido em SQLite (M0). Nó de agente
 conversando com o **Claude Code de verdade**: face conversa e face terminal,
 turno com cancelamento, ações como cards, retomada da sessão e custo por turno e
 por workspace (M1). Notas que viram `.md` na sua pasta, árvore de arquivos de
-verdade, e o agente gravando **só depois de você aprovar** (M2). E agora um
-agente **fala com outro**: o Pesquisador pede ao Redator e devolve a resposta,
-sem você tocar (M3).
+verdade, e o agente gravando **só depois de você aprovar** (M2). Um agente
+**fala com outro**: o Pesquisador pede ao Redator e devolve a resposta, sem
+você tocar (M3). E agora um prompt **monta o time**: papéis com prompt e
+ferramentas próprias, um Organizador que recruta quem falta, e o time inteiro
+salvo para reabrir amanhã (M4).
 
 > **Um nó só enxerga o que os cabos deixam.** Ligou `fala_com`? Pode mandar
 > recado. Não ligou? Aquele nó **não existe** — e a mensagem de erro é a mesma
@@ -39,11 +41,11 @@ MUTIRAO_CLAUDE_BIN=...  npm run app   # CLI fora do PATH (comum no Windows)
 Testes:
 
 ```bash
-cargo test -p nucleo        # 92 testes, offline e de graça
-node testes-ui/fumaca.mjs   # 46 verificações da interface no Chromium
+cargo test -p nucleo        # 113 testes, offline e de graça
+node testes-ui/fumaca.mjs   # 55 verificações da interface no Chromium
 
 # Estes gastam token e precisam da CLI instalada. Rode ao subir de versão dela.
-# Os dois do M3 sobem DOIS Claude Code ao mesmo tempo, um falando com o outro.
+# Os do M3 e do M4 sobem VÁRIOS Claude Code ao mesmo tempo, falando entre si.
 cargo test -p nucleo --test ao_vivo -- --ignored --nocapture
 ```
 
@@ -66,7 +68,7 @@ janela, IPC e a tradução de evento do núcleo em evento de janela. O front
 
 Essa separação existe por um motivo prático: `cargo test -p nucleo` roda em
 qualquer máquina, sem as dependências de sistema do Tauri — e é onde estão os
-92 testes, inclusive os de turno completo e os da ponte entre nós.
+113 testes, inclusive os de turno completo, os da ponte entre nós e os do time.
 
 O adaptador falso (`nucleo/src/agente.rs`) não é conveniência de teste: testar
 orquestração contra a API de verdade é lento, caro e não-determinístico. Ele lê
@@ -99,6 +101,28 @@ esperando B e B pergunta de volta a A. Saltos só contam quando alguém anda,
 orçamento só soma quando alguém gasta, e o prazo pega em dez minutos, que para
 quem está olhando a tela é travar. Por isso o orquestrador segue a corrente de
 quem-espera-quem e recusa na hora, dizendo ao modelo o que fazer em vez disso.
+
+E uma quinta, no M4: nenhum dos quatro impede um agente de **recrutar** cem
+outros, porque recrutar não é salto nem gasto de mensagem. Entraram um teto por
+cadeia e outro por workspace.
+
+## Papéis
+
+Um papel é prompt de sistema + ferramentas + autonomia. Vêm cinco no app —
+Pesquisador, Redator, Revisor, Analista e Organizador —, e o papel escolhido
+aparece no cabeçalho de cada nó.
+
+**Autonomia escolhe ferramentas, nunca permissões.** `cauteloso` só lê e
+conversa; `padrao` grava, com card; `solto` também roda comando, com card
+sempre. Nenhum nível dispensa a aprovação — um que dispensasse seria o "pular
+todas as permissões" que o `ARQUITETURA.md §8` proíbe, com outro nome.
+
+O Organizador monta time com `recrutar`. Quem ele recruta nasce ligado a ele e
+com papel; `dispensar` encerra a sessão e **não apaga o nó** — apagar levaria a
+conversa junto, e quem apaga nó é você.
+
+**Salvar time** guarda quem trabalha e como está ligado, para reabrir amanhã.
+Não guarda a conversa: partitura é a planta do time, não um backup dele.
 
 ## Licença e uso
 

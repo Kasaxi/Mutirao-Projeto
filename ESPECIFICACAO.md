@@ -5,11 +5,11 @@ Companheiro do `ARQUITETURA.md`. Aquele diz **o quê** e **por quê**; este diz
 abrir este arquivo e escrever a próxima função sem inventar nome, caminho ou
 formato.
 
-Estado atual: **M0, M1 e M2 prontos e testados** contra o Claude Code de
-verdade — sessão, turno, cancelamento, custo, retomada, face conversa, face
-terminal, e agora o barramento local com o card de aprovação, notas em arquivo
-e árvore da pasta. O agente grava, e só depois de você deixar. M3 em diante
-ainda é contrato, não código.
+Estado atual: **M0 a M4 prontos e testados** contra o Claude Code de verdade —
+sessão, turno, cancelamento, custo, retomada, duas faces (M1); barramento local
+com card de aprovação, notas em arquivo e árvore da pasta (M2); servidor MCP,
+ponte entre nós e os limites da cadeia (M3); papéis, Maestro Mode e times
+salvos (M4). M5 em diante ainda é contrato, não código.
 
 ---
 
@@ -29,19 +29,25 @@ mutirao/
 │   ├── Cargo.toml
 │   ├── migrations/
 │   │   ├── 001_inicial.sql        esquema completo, executável
-│   │   └── 002_adaptador_falso.sql  'falso' no CHECK de session.adaptador
+│   │   ├── 002_adaptador_falso.sql  'falso' no CHECK de session.adaptador
+│   │   ├── 003_regras_de_aprovacao.sql  a caixa "não perguntar de novo"
+│   │   └── 004_papeis.sql        papel no nó, modelo por papel, quem recrutou
 │   ├── testes/
 │   │   └── claude_stream.jsonl  saída REAL da CLI, guardada como fixture
 │   ├── tests/
 │   │   └── ao_vivo.rs      testes #[ignore] que rodam o Claude Code de verdade
 │   └── src/
-│       ├── lib.rs          fachada + 69 testes
+│       ├── lib.rs          fachada + 113 testes
 │       ├── modelo.rs       tipos de domínio, máquina de estados, preços
 │       ├── agente.rs       trait AgenteAdapter, Roteiro, adaptador falso
 │       ├── claude.rs       adaptador do Claude Code (CLI headless)
 │       ├── barramento.rs   servidor local, escopo por token, aprovação
+│       ├── mcp.rs          servidor MCP em /mcp, JSON-RPC 2.0
+│       ├── ferramentas.rs  as ferramentas do §6, com escopo pelos cabos
+│       ├── papeis.rs       biblioteca embutida e escada de autonomia
+│       ├── partituras.rs   fotografar e montar um time salvo
 │       ├── arquivos.rs     escopo de caminho, listar, ler e gravar
-│       ├── orquestrador.rs turno, bomba de eventos, custo
+│       ├── orquestrador.rs turno, fila, ponte entre nós, limites
 │       ├── db.rs           migrations e todo o acesso a dados
 │       └── erro.rs         Erro, códigos estáveis
 │
@@ -70,9 +76,12 @@ mutirao/
 │       └── Cabos.tsx       SVG dos cabos
 │
 └── testes-ui/
-    ├── fumaca.mjs          27 verificações no Chromium
+    ├── fumaca.mjs          55 verificações no Chromium
     ├── canvas.png          retrato do canvas em repouso
-    └── conversa.png        retrato de um turno inteiro
+    ├── conversa.png        retrato de um turno inteiro
+    ├── aprovacao.png       o card aberto, com o turno parado atrás
+    ├── ponte.png           a ponte no ato de atravessar
+    └── time.png            o time montado, com papel em cada nó
 ```
 
 **Regra de ouro:** nenhuma regra de negócio em `src-tauri/`. Se um comando
@@ -103,7 +112,7 @@ npm run app                 # app de verdade (tauri dev)
 npm run build               # typecheck + build do front
 npm run app:build           # instalador MSI/NSIS
 
-cargo test -p nucleo        # 43 testes do núcleo
+cargo test -p nucleo        # 113 testes do núcleo, offline e de graça
 node testes-ui/fumaca.mjs   # teste de fumaça da interface
 ```
 
@@ -167,6 +176,16 @@ detalhe vai para o stderr.
 | `enviar_mensagem` | `sessionId, texto` | — | `invalido` (vazia, turno em andamento), `nao_encontrado` |
 | `cancelar_turno` | `sessionId` | — | `nao_encontrado` |
 | `historico` | `sessionId, limite` | `Mensagem[]` | — |
+| `listar_papeis` | — | `Papel[]` | — |
+| `criar_papel` | `nome, prompt, ferramentas, autonomia, modelo` | `Papel` | `invalido` (nome repetido, prompt vazio) |
+| `editar_papel` | `id, prompt, ferramentas, autonomia, modelo` | `Papel` | `nao_encontrado`, `invalido` |
+| `remover_papel` | `id` | — | `invalido` (embutido), `nao_encontrado` |
+| `quantos_usam_o_papel` | `id` | `number` | — |
+| `definir_papel_do_no` | `nodeId, roleId \| null` | `No` | `nao_encontrado` |
+| `salvar_time` | `workspaceId, nome` | `Partitura` | `invalido` (nome vazio, canvas vazio) |
+| `listar_times` | `workspaceId` | `Partitura[]` | — |
+| `abrir_time` | `workspaceId, partituraId` | `No[]` | `nao_encontrado`, `invalido` (passaria do teto) |
+| `remover_time` | `id` | — | `nao_encontrado` |
 | `acoes_da_sessao` | `sessionId` | `ChamadaFerramenta[]` | — |
 | `custo_do_workspace` | `workspaceId` | `{ total, por_no }` | — |
 
@@ -297,16 +316,15 @@ listar_arquivos { caminho?: string } -> { itens: { caminho, nome, pasta, tamanho
 ler_arquivo     { caminho: string } -> { conteudo: string }
 escrever_arquivo { caminho: string, conteudo: string } -> { bytes: number }
 
-recrutar { papel: string, nome: string } -> { no: string }      // M4
-dispensar { no: string } -> { encerrado: true }                  // M4
+recrutar { papel: string, nome: string } -> { no: string }
+dispensar { no: string } -> { encerrado: true }
 
 perguntar_humano { pergunta: string, opcoes?: string[] } -> { resposta: string }
 concluir { resumo: string } -> { ok: true }
 ```
 
-Implementadas em `nucleo/src/ferramentas.rs`; `recrutar` e `dispensar` ficam
-para o M4, junto com os times. Duas diferenças em relação ao rascunho acima, e
-as duas nasceram de escrever o código:
+Implementadas em `nucleo/src/ferramentas.rs`. Duas diferenças em relação ao
+rascunho acima, e as duas nasceram de escrever o código:
 
 - `ler_arquivo` perdeu o `truncado`. Ele prometia o que a implementação não
   entrega: `arquivos::ler_texto` **recusa** um arquivo grande demais em vez de
@@ -314,6 +332,15 @@ as duas nasceram de escrever o código:
   não tem como saber que leu metade.
 - `listar_nos` não estava na lista e precisa estar. Sem ela o agente descobre
   os vizinhos por tentativa e erro, e cada tentativa é uma sonda.
+
+E uma sobre `dispensar`: ela **não apaga o nó**, e a palavra do rascunho já
+dizia isso — "encerrado", não "removido". Apagar levaria a conversa junto por
+CASCADE, e destruir trabalho por conta de um agente é o oposto do §8. Quem
+apaga nó é a pessoa, com o botão que já existe.
+
+`recrutar` e `dispensar` não passam pela escada de autonomia: quem as tem é
+quem as listou no papel. Um Revisor `solto` roda comando e ainda assim não
+monta time; um Organizador `padrao` monta. Montar time é função, não nível.
 
 O agente endereça vizinhos **por nome**, não por id: id é detalhe interno e
 convida a erro de cópia. A resolução nome → id acontece dentro do conjunto
@@ -390,6 +417,76 @@ você já tem."* Um `aviso` passa: ele não espera ninguém.
 O teste `dois_nos_esperando_um_pelo_outro_nao_travam_o_app` usa dois adaptadores
 teimosos, que só sabem perguntar. Ele foi verificado ao contrário — com a
 checagem desligada, os dois nós travam e o teste falha.
+
+---
+
+## 5b. Papéis, times e os tetos de crescimento
+
+Papel = prompt de sistema + ferramentas + autonomia (+ modelo, se quiser). É o
+que transforma "um agente" em "o Revisor": sem ele, quatro nós lado a lado são
+o mesmo programa com nomes diferentes, e quatro iguais não são um time.
+
+O prompt vai para o `--append-system-prompt` da CLI em **todo** turno. Medido
+na 2.1.251, ele sobrevive ao `--resume` sozinho — o turno seguinte obedece sem
+a flag. Passamos de novo assim mesmo, e é isso que faz uma **edição** de papel
+valer para a conversa que já existe; sem repetir, mudar o prompt não teria
+efeito sobre os nós que já o usam, e falharia calado.
+
+### A escada de autonomia escolhe ferramentas, não permissões
+
+| | lê e conversa | grava nota e arquivo | roda comando |
+|---|---|---|---|
+| `cauteloso` | sim | não | não |
+| `padrao` | sim | sim, **com card** | não |
+| `solto` | sim | sim, **com card** | sim, com card **sempre** |
+
+Nenhum nível dispensa a aprovação. Um que dispensasse seria o "pular todas as
+permissões" que o `ARQUITETURA.md §8` proíbe, com outro nome. O "sempre" da
+última coluna não é ênfase: `Bash` não entra em
+`FERRAMENTAS_QUE_ACEITAM_REGRA`, então nem o "não perguntar de novo" o libera.
+
+Um papel pode **estreitar** a lista da autonomia, nunca alargá-la. Se pudesse,
+`cauteloso` deixaria de querer dizer alguma coisa — e um nome que não quer
+dizer nada dá confiança sem base.
+
+**Nó sem papel continua com tudo**, que é o que o adaptador oferecia antes do
+M4. Todo nó criado até aqui está assim, e estreitar o que eles alcançam seria
+mudar o workspace de alguém sem ele pedir.
+
+### O escopo do papel vale no servidor
+
+O `--tools` da CLI esconde as ferramentas do modelo, mas **esconder não é
+impedir**: um `tools/call` chega por HTTP e quem monta o corpo é o processo do
+agente. A checagem que conta está em `ferramentas::executar`, antes de qualquer
+efeito. Uma ferramenta fora do papel dá a mesma frase de uma que não existe,
+pelo mesmo motivo do §4: "existe mas você não pode" é um mapa.
+
+### Os tetos de recrutamento — o quinto e o sexto limite
+
+Os quatro limites do M3 incidem sobre a **conversa**: saltos, prazo, orçamento
+por cadeia, espera cruzada. Nenhum deles impede um Maestro de recrutar cem
+agentes num turno só, porque recrutar não é salto nem gasto de mensagem.
+
+- `MAX_RECRUTAS_POR_CADEIA` (6) — o teto de um pedido.
+- `MAX_AGENTES_POR_WORKSPACE` (20) — o teto acumulado, para o caso que o de
+  cima não cobre: três hoje, três amanhã, três depois.
+
+`recrutar` **não** pede card. Ele não grava em disco nem destrói nada; o que
+faz é gastar dinheiro, e para isso servem os tetos. Um card por recruta
+transformaria "monte um time de quatro" em quatro interrupções, e interrupção
+que vira rotina é interrupção que se aprova sem ler.
+
+### Partitura é a planta do time, não um backup
+
+Guarda nós (tipo, nome, geometria, config, papel **pelo nome**) e cabos (pelos
+índices no vetor de nós). Não guarda conversa, sessão, custo nem arquivo.
+
+Daí decorre o resto: `NoSalvo` não tem id, porque o id pertence ao canvas onde
+o nó vive e reabrir cria nós **novos**; o papel vai pelo nome, porque uma
+partitura precisa abrir noutra máquina onde o mesmo papel tem outro id; e
+reabrir nunca sobrescreve, então abrir duas vezes dá dois times em vez de um
+time corrompido pela metade. Nome repetido ganha sufixo — dois "Redator"
+quebrariam o `enviar_para`, que resolve vizinho pelo nome.
 
 ---
 
@@ -499,9 +596,9 @@ Nenhuma palavra de Git aparece. Binário não faz merge: escolhe-se um lado.
 
 | Camada | Como | Cobre |
 |---|---|---|
-| Núcleo | `cargo test -p nucleo` — 92 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras, handshake do MCP, ponte entre nós, fila e os limites |
-| Interface | `node testes-ui/fumaca.mjs` — 46 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; um turno de ponta a ponta; o card de aprovação com aprovar, negar e "não perguntar de novo"; nota em arquivo e árvore da pasta; o cabo acendendo e o recado chegando ao outro nó com o nome de quem pediu |
-| Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` — 10 testes | o Claude Code de verdade: lê, responde, cobra, retoma, reporta erro com a frase certa, grava depois de aprovado, **não** grava quando negado, **não** grava sem barramento — e, com **dois** processos, entrega de um nó a outro e encerra a cadeia sem travar |
+| Núcleo | `cargo test -p nucleo` — 113 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras, handshake do MCP, ponte entre nós, fila e os limites, papéis e escada de autonomia, recrutamento com teto, partitura ida e volta |
+| Interface | `node testes-ui/fumaca.mjs` — 55 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; um turno de ponta a ponta; o card de aprovação com aprovar, negar e "não perguntar de novo"; nota em arquivo e árvore da pasta; o cabo acendendo e o recado chegando ao outro nó com o nome de quem pediu; papel no cabeçalho, time salvo e reaberto com a forma que tinha |
+| Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` — 13 testes | o Claude Code de verdade: lê, responde, cobra, retoma, reporta erro com a frase certa, grava depois de aprovado, **não** grava quando negado, **não** grava sem barramento — e, com **dois** processos, entrega de um nó a outro e encerra a cadeia sem travar; e um prompt monta um time de quatro, com o papel mudando o que cada agente de fato faz |
 
 **Duas pastas parecidas, de propósito.** `nucleo/testes/` guarda fixtures (nome
 em português, como o resto); `nucleo/tests/` é a pasta que o Cargo exige em
@@ -845,47 +942,58 @@ pronto do `ARQUITETURA.md`.
   Claude Code de verdade em `o_pesquisador_entrega_ao_redator_sem_eu_tocar`: o
   recado atravessa em 17 segundos, o Redator responde, a resposta volta na
   mesma cadeia, e a cadeia inteira custou US$ 0,088.
+- **M4** — *um prompt monta um time de quatro, e amanhã eu reabro o mesmo time
+  como estava.* Funciona. Em `um_prompt_monta_um_time`, o Organizador montou
+  Chefe, Ana (Pesquisador), Bruno e Carla (Redator), cada um com papel, cabo e
+  trabalho recebido. E `o_papel_muda_o_que_o_agente_faz_de_verdade` prova a
+  outra metade do que um papel vale: o Pesquisador, mandado gravar um arquivo,
+  leu, **não gravou** e explicou que ia delegar — porque o papel `cauteloso`
+  não recebe ferramenta de escrita nenhuma.
 
-### O que ficou de fora do M3, com intenção
+### O que ficou de fora do M3 e do M4, com intenção
 
 1. **Adaptador Codex.** O plano previa fazê-lo no M3 "para provar que a ponte é
    agnóstica". A ponte é agnóstica por construção — quem fala com outro nó é o
    `Orquestrador`, e o adaptador só emite `EventoAgente` —, mas isso é
    argumento, não prova, e a prova exige a CLI do Codex instalada. Fica para
    quando ela estiver na máquina.
-2. **Face terminal com histórico.** Ela mostra o fluxo cru a partir do turno
+2. **Editor de papéis na interface.** O núcleo tem `criar_papel`,
+   `editar_papel` e `remover_papel`, e o IPC os expõe; a interface só **usa** a
+   biblioteca, não a edita. Um editor é uma tela, não uma decisão de
+   arquitetura — e a biblioteca embutida cobre o trabalho de hoje.
+3. **Face terminal com histórico.** Ela mostra o fluxo cru a partir do turno
    seguinte, porque o fluxo não é gravado — só o que ele produz.
-3. **Modelo por papel.** O adaptador não passa `--model`: segue o que a CLI do
-   usuário estiver configurada para usar. É do M4, quando papel existir.
 4. **Ensaios e Git oculto.** São do M5. A pasta do workspace é uma pasta comum,
    ainda sem repositório por baixo.
 5. **Escolher a pasta do workspace pela interface.** Ela nasce em
    `Documentos/Mutirão/<nome>`. Um seletor de pasta exige o plugin de diálogo
    do Tauri; é uma tela, não uma decisão de arquitetura.
 
-### Começando o M4
+### Começando o M5
 
-O M4 é *"três agentes trabalham numa entrega e eu só leio o resultado"*. O que
-o M3 deixa pronto:
+O M5 é *"dois ensaios do mesmo trabalho rodam ao mesmo tempo e eu publico um
+deles sem entender de Git"*. O que o M4 deixa pronto:
 
-1. A ponte inteira: `enviar_para`, `avisar`, a fila por nó, os limites e o
-   escopo pelos cabos. Um time é isso rodando com mais nós, não um mecanismo
-   novo.
-2. O servidor MCP já está de pé com escopo por token. `recrutar` e `dispensar`
-   entram no mesmo `ferramentas::catalogo()`, com a mesma execução.
-3. `EventoNucleo::NoMensagem` já anima o cabo, e o front já sabe montar a
-   conversa de um nó com quem falou.
+1. `node.ensaio_id` e a tabela `ensaio` existem desde a 001, com `ON DELETE
+   CASCADE` — o isolamento por ensaio tem onde morar sem migration nenhuma.
+2. `partituras::montar` já sabe recriar um time inteiro a partir de um
+   snapshot. Um ensaio é parente próximo disso: mesmo canvas, outro worktree.
+3. O `workspace.pasta` já é a única raiz que o agente enxerga
+   (`arquivos::dentro_do_escopo`), então trocar a raiz por ensaio troca o mundo
+   do agente sem mexer em mais nada.
 
-O que precisa nascer: a tabela `role` de verdade (papel, prompt de sistema,
-modelo por papel — o adaptador ainda não passa `--model`), a criação de nó por
-ferramenta, e um jeito de o usuário ver um time como uma coisa só em vez de
-três nós soltos no canvas.
+O que precisa nascer: `git init` oculto na criação do workspace, `git worktree`
+por ensaio, a tela de publicar em linguagem de gente, e a escolha lado a lado
+para binário — que não faz merge, escolhe-se um lado.
 
-Um cuidado que o M3 comprou caro e vale carregar: **um agente que cria outro
-agente é um limite novo**. Os três de hoje incidem sobre a cadeia; nenhum deles
-impede um nó de recrutar dez. Antes de `recrutar` existir, decida quem paga a
-conta e quem para o crescimento — pelo mesmo motivo que a espera cruzada
-precisou de checagem própria: o limite que ninguém previu é o que trava o app.
+Dois cuidados que os marcos anteriores compraram caro:
+
+- **O agente roda com `current_dir` na pasta do workspace.** Se o ensaio troca
+  a pasta, o adaptador precisa saber disso *antes* de abrir o processo, não
+  depois. Uma sessão viva apontando para o worktree errado grava no lugar
+  errado com aprovação legítima — o pior tipo de bug que este projeto pode ter.
+- **Publicar é irreversível para quem não conhece Git.** Vale o mesmo padrão do
+  card: mostrar o que muda antes, e não desfazer depois.
 
 Escreva o roteiro novo para o adaptador falso no mesmo dia — é ele que mantém
 o custo de cada iteração em zero.

@@ -104,10 +104,18 @@ pub fn ferramentas_do_papel(papel: Option<&Papel>) -> Vec<String> {
         .collect()
 }
 
-/// As nativas de um papel. Sem papel, o mesmo que `padrao` — que é o que o
-/// adaptador já fazia antes de papel existir.
+/// As nativas de um papel.
+///
+/// Sem papel, o conjunto **completo** — que é exatamente o que o adaptador
+/// oferecia antes de papel existir. Não é descuido: todo nó criado até o M4
+/// está sem papel, e estreitar o que eles alcançam seria mudar o workspace de
+/// alguém sem ele pedir. Quem escolhe um papel escolhe a escada junto; quem
+/// não escolheu continua com o que tinha.
 pub fn nativas_do_papel(papel: Option<&Papel>) -> &'static [&'static str] {
-    nativas(papel.map(|p| p.autonomia).unwrap_or(Autonomia::Padrao))
+    match papel {
+        Some(p) => nativas(p.autonomia),
+        None => nativas(Autonomia::Solto),
+    }
 }
 
 /// Este papel pode recrutar? Só quem tem a ferramenta na lista.

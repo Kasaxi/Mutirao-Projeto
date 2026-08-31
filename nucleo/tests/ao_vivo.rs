@@ -14,7 +14,7 @@
 
 use nucleo::{
     Adaptador, Banco, Barramento, Decisao, EstadoSessao, EventoNucleo, Fabrica, FabricaClaude,
-    Orquestrador, PapelMensagem, PedidoAprovacao, Sink, TipoNo,
+    Orquestrador, PapelMensagem, PedidoAprovacao, Sink, TipoCabo, TipoNo,
 };
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -515,4 +515,250 @@ fn um_ciclo_entre_dois_nos_encerra_sozinho() {
         minha.iter().any(|m| m.papel == PapelMensagem::Agente),
         "o Pesquisador não chegou a responder nada"
     );
+}
+
+// ==================================================================== M4 ===
+// "um prompt monta um time de quatro, e amanhã eu reabro o mesmo time como
+// estava" — o critério de pronto do M4.
+
+/// Um Organizador sozinho num workspace, com a biblioteca de papéis no banco.
+struct Maestro {
+    banco: Arc<Mutex<Banco>>,
+    orq: Arc<Orquestrador>,
+    sessao: String,
+    ws: String,
+    pasta: std::path::PathBuf,
+    _barramento: Barramento,
+}
+
+fn maestro() -> Maestro {
+    let pasta = std::env::temp_dir().join(format!("mutirao-time-{}", nucleo::novo_id()));
+    std::fs::create_dir_all(&pasta).unwrap();
+    std::fs::write(
+        pasta.join("contrato.txt"),
+        "Prazo: 18 meses. Reajuste anual pelo IGP-M. Multa por atraso: 2% ao mês.\n",
+    )
+    .unwrap();
+
+    let banco = Banco::em_memoria().unwrap();
+    let ws = banco.criar_workspace("Time", pasta.to_str().unwrap()).unwrap();
+    let papel = banco.papel_por_nome("Organizador").unwrap().expect("biblioteca embutida");
+    let no = banco
+        .criar_no_recrutado(&ws.id, TipoNo::Agente, "Chefe", 0.0, 0.0, Some(&papel.id), None)
+        .unwrap();
+    let banco = Arc::new(Mutex::new(banco));
+
+    let sink: Sink = Arc::new(|_| {});
+    let fabrica: Arc<dyn Fabrica> = Arc::new(FabricaClaude::nova());
+    let orq = Arc::new(Orquestrador::novo(banco.clone(), fabrica, sink.clone()));
+    let barramento = Barramento::subir(banco.clone(), orq.clone(), sink).unwrap();
+    orq.ligar_barramento(barramento.url_base());
+
+    let sessao = orq.abrir_sessao(&no.id, Adaptador::Claude).unwrap();
+    Maestro {
+        banco,
+        orq,
+        sessao: sessao.id,
+        ws: ws.id,
+        pasta,
+        _barramento: barramento,
+    }
+}
+
+impl Maestro {
+    fn agentes(&self) -> Vec<nucleo::No> {
+        self.banco
+            .lock()
+            .unwrap()
+            .listar_nos(&self.ws)
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.tipo == TipoNo::Agente)
+            .collect()
+    }
+
+    /// Espera TODOS os nós pararem. Um só parado não prova nada num time.
+    fn esperar_o_time(&self, limite: Duration) -> bool {
+        let inicio = Instant::now();
+        while inicio.elapsed() < limite {
+            let banco = self.banco.lock().unwrap();
+            let todos_parados = banco
+                .listar_nos(&self.ws)
+                .unwrap()
+                .iter()
+                .filter(|n| n.tipo == TipoNo::Agente)
+                .filter_map(|n| banco.sessao_do_no(&n.id).ok().flatten())
+                .all(|s| matches!(s.estado, EstadoSessao::Ocioso | EstadoSessao::Erro));
+            drop(banco);
+            if todos_parados {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        false
+    }
+}
+
+impl Drop for Maestro {
+    fn drop(&mut self) {
+        self.orq.encerrar_tudo();
+        let _ = std::fs::remove_dir_all(&self.pasta);
+    }
+}
+
+#[test]
+#[ignore = "gasta token e precisa do Claude Code instalado"]
+fn um_prompt_monta_um_time() {
+    let m = maestro();
+    m.orq
+        .enviar(
+            &m.sessao,
+            "Preciso de um parecer sobre o contrato.txt desta pasta. Monte um time: \
+             recrute um Pesquisador chamado Ana para ler o contrato e um Redator \
+             chamado Bruno para escrever o parecer. Depois peça a cada um a parte \
+             dele com enviar_para e me entregue o resultado.",
+        )
+        .unwrap();
+
+    assert!(
+        m.esperar_o_time(Duration::from_secs(500)),
+        "o time não parou; agentes: {:?}",
+        m.agentes().iter().map(|n| &n.nome).collect::<Vec<_>>()
+    );
+
+    let agentes = m.agentes();
+    println!("time montado: {:?}", agentes.iter().map(|n| &n.nome).collect::<Vec<_>>());
+    assert!(agentes.len() >= 3, "o Chefe não recrutou ninguém: {}", agentes.len());
+
+    // Os recrutados vieram com papel e com quem os recrutou — sem isso são
+    // agentes anônimos com nome bonito.
+    let banco = m.banco.lock().unwrap();
+    let recrutados: Vec<&nucleo::No> =
+        agentes.iter().filter(|n| n.recrutado_por.is_some()).collect();
+    assert!(!recrutados.is_empty(), "ninguém foi marcado como recrutado");
+    for r in &recrutados {
+        let papel = r
+            .role_id
+            .as_deref()
+            .map(|id| banco.obter_papel(id).unwrap().nome)
+            .unwrap_or_default();
+        println!("  {} — papel {papel}", r.nome);
+        assert!(!papel.is_empty(), "{} veio sem papel", r.nome);
+        // E ligado a quem recrutou: sem cabo o recrutado é uma ilha.
+        let vizinhos = banco.vizinhos(&r.id, TipoCabo::FalaCom).unwrap();
+        assert!(vizinhos.contains(r.recrutado_por.as_ref().unwrap()), "{} ficou solto", r.nome);
+    }
+
+    // E o time trabalhou: alguém além do Chefe recebeu recado de nó.
+    let trabalhou = recrutados.iter().any(|r| {
+        banco
+            .sessao_do_no(&r.id)
+            .ok()
+            .flatten()
+            .map(|s| {
+                banco
+                    .historico(&s.id, 50)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|msg| msg.papel == PapelMensagem::No)
+            })
+            .unwrap_or(false)
+    });
+    assert!(trabalhou, "o time foi montado e ninguém trabalhou");
+}
+
+#[test]
+#[ignore = "gasta token e precisa do Claude Code instalado"]
+fn o_papel_muda_o_que_o_agente_faz_de_verdade() {
+    // O papel só vale se o modelo obedecer. Este teste é o único que prova
+    // isso: o Pesquisador é instruído a NÃO escrever, e recebe um pedido para
+    // escrever. Ele tem de recusar e mandar para quem escreve.
+    let m = maestro();
+    let (pesquisador, sessao) = {
+        let banco = m.banco.lock().unwrap();
+        let papel = banco.papel_por_nome("Pesquisador").unwrap().unwrap();
+        let no = banco
+            .criar_no_recrutado(
+                &m.ws,
+                TipoNo::Agente,
+                "Ana",
+                400.0,
+                0.0,
+                Some(&papel.id),
+                None,
+            )
+            .unwrap();
+        drop(banco);
+        let s = m.orq.abrir_sessao(&no.id, Adaptador::Claude).unwrap();
+        (no, s)
+    };
+
+    m.orq
+        .enviar(
+            &sessao.id,
+            "Leia contrato.txt e grave um arquivo parecer.txt com o resumo.",
+        )
+        .unwrap();
+    assert!(m.esperar_o_time(Duration::from_secs(300)), "o turno não terminou");
+
+    let banco = m.banco.lock().unwrap();
+    let resposta = banco
+        .historico(&sessao.id, 50)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|msg| msg.papel == PapelMensagem::Agente)
+        .expect("sem resposta");
+    println!("o Pesquisador respondeu: {}", resposta.conteudo);
+
+    // A prova dura: o arquivo NÃO existe. O papel `cauteloso` não recebe
+    // ferramenta de escrita nenhuma, nem nativa nem do §6.
+    assert!(
+        !m.pasta.join("parecer.txt").exists(),
+        "o Pesquisador gravou apesar do papel dizer que não escreve"
+    );
+    let _ = pesquisador;
+}
+
+#[test]
+#[ignore = "gasta token e precisa do Claude Code instalado"]
+fn amanha_eu_reabro_o_mesmo_time() {
+    // A segunda metade do critério. Não usa a CLI para nada além de existir:
+    // o que se mede aqui é que o time salvo volta inteiro, com papéis e cabos.
+    let m = maestro();
+    {
+        let banco = m.banco.lock().unwrap();
+        for (nome, papel) in [("Ana", "Pesquisador"), ("Bruno", "Redator"), ("Célia", "Revisor")] {
+            let p = banco.papel_por_nome(papel).unwrap().unwrap();
+            let no = banco
+                .criar_no_recrutado(&m.ws, TipoNo::Agente, nome, 400.0, 0.0, Some(&p.id), None)
+                .unwrap();
+            let chefe = banco.listar_nos(&m.ws).unwrap()[0].id.clone();
+            banco.criar_cabo(&m.ws, &chefe, &no.id, TipoCabo::FalaCom).unwrap();
+        }
+    }
+    assert_eq!(m.agentes().len(), 4, "o time de quatro");
+
+    // Salva, e abre num workspace novo — que é o teste de verdade de
+    // "reabrir", porque prova que a partitura não depende dos ids de origem.
+    let banco = m.banco.lock().unwrap();
+    let snapshot = nucleo::partituras::fotografar(&banco, &m.ws).unwrap();
+    let partitura = banco.salvar_partitura(&m.ws, "Parecer de contrato", &snapshot).unwrap();
+
+    let outra = std::env::temp_dir().join(format!("mutirao-amanha-{}", nucleo::novo_id()));
+    std::fs::create_dir_all(&outra).unwrap();
+    let ws2 = banco.criar_workspace("Amanhã", outra.to_str().unwrap()).unwrap();
+    let novos = nucleo::partituras::montar(&banco, &ws2.id, &partitura).unwrap();
+
+    assert_eq!(novos.len(), 4);
+    let mut com_papel = 0;
+    for n in &novos {
+        if let Some(id) = &n.role_id {
+            println!("  {} — {}", n.nome, banco.obter_papel(id).unwrap().nome);
+            com_papel += 1;
+        }
+    }
+    assert_eq!(com_papel, 4, "alguém voltou sem papel");
+    assert!(!banco.listar_cabos(&ws2.id).unwrap().is_empty(), "os cabos não voltaram");
+    let _ = std::fs::remove_dir_all(&outra);
 }

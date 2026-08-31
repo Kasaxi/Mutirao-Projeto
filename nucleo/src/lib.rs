@@ -2680,4 +2680,22 @@ mod testes {
         assert_eq!(novos.len(), 1);
         assert_eq!(novos[0].role_id, None, "inventou um papel");
     }
+
+    #[test]
+    fn no_sem_papel_continua_com_o_que_tinha_antes_do_m4() {
+        // Todo nó criado até o M4 está sem papel. Estreitar o que eles
+        // alcançam seria mudar o workspace de alguém sem ele pedir — e
+        // "atualizei o app e meu agente parou de rodar comando" é o tipo de
+        // regressão que ninguém liga ao marco que a causou.
+        let nativas = papeis::nativas_do_papel(None);
+        for f in ["Read", "Glob", "Grep", "Write", "Edit", "NotebookEdit", "Bash"] {
+            assert!(nativas.contains(&f), "nó sem papel perdeu {f}");
+        }
+        // E continua alcançando as do §6 — menos montar time, que é função de
+        // papel e não padrão de fábrica.
+        let doSeis = papeis::ferramentas_do_papel(None);
+        assert!(doSeis.contains(&"escrever_nota".to_string()));
+        assert!(doSeis.contains(&"enviar_para".to_string()));
+        assert!(!doSeis.contains(&"recrutar".to_string()));
+    }
 }

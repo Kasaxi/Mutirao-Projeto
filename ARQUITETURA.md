@@ -332,6 +332,25 @@ Três correções ao que está escrito acima:
 
 **Pronto quando:** um prompt monta um time de quatro, e amanhã eu reabro o mesmo time como estava.
 
+**Pronto.** Com o Claude Code de verdade: um prompt ao Organizador montou Chefe, Ana (Pesquisador),
+Bruno e Carla (Redator), cada um com papel, cabo e trabalho recebido. E o time salvo volta inteiro
+noutro workspace, com papéis e cabos — provando que a partitura não depende dos ids de onde nasceu.
+
+O que o marco corrigiu no plano:
+
+1. **A escada de autonomia não é o que o nome sugere.** `cauteloso | padrao | solto` escolhe o
+   **conjunto de ferramentas**, nunca se o card aparece. Um nível que dispensasse a aprovação seria
+   o "pular todas as permissões" que a §8 proíbe, com outro nome. Um papel `solto` grava com card
+   igual a um `padrao`; ele só alcança mais coisa.
+2. **`dispensar` não apaga.** Apagar o nó levaria a conversa junto por CASCADE, e destruir trabalho
+   por conta de um agente é o oposto da §8. A palavra do `ESPECIFICACAO.md §5` já era "encerrado".
+3. **Faltava o quinto limite.** Os quatro do M3 incidem sobre a conversa; nenhum impede um Maestro
+   de recrutar cem num turno. Entraram um teto por cadeia e outro por workspace. Era o risco
+   anotado no fim do M3, e ele estava certo.
+4. **O escopo do papel vale no servidor, não na CLI.** O `--tools` esconde as ferramentas do
+   modelo, mas um `tools/call` chega por HTTP e quem monta o corpo é o processo do agente.
+   Esconder não é impedir.
+
 ### M5 — Paralelo e mundo externo · 3 semanas
 - Ensaios sobre worktree oculto, com tela de publicar em linguagem de gente
 - Portal de navegador em WebView2 controlável por CDP
