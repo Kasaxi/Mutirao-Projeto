@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Cabos } from "./canvas/Cabos";
+import { Cabos, type Recado } from "./canvas/Cabos";
 import { NoView } from "./canvas/NoView";
 import {
   enquadrar,
@@ -17,7 +17,9 @@ import {
   type Adaptador,
   type EstadoCanvas,
   type EstadoSessao,
+  type EventoCadeiaEncerrada,
   type EventoCusto,
+  type EventoNoMensagem,
   type No,
   type TipoNo,
   type Viewport,
@@ -32,6 +34,15 @@ type Arrasto =
 const MIN_LARGURA = 160;
 const MIN_ALTURA = 100;
 
+/**
+ * Quanto tempo o cabo fica aceso depois de um recado.
+ *
+ * Curto demais e o usuário perde o único sinal de que os nós conversaram;
+ * longo demais e o canvas fica piscando o tempo todo numa conversa de vários
+ * saltos. Três segundos dá para o olho pegar sem virar ruído.
+ */
+const DURACAO_RECADO_MS = 3000;
+
 export default function App() {
   const [estado, setEstado] = useState<EstadoCanvas | null>(null);
   const [vp, setVp] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
@@ -42,6 +53,10 @@ export default function App() {
   // Quem sabe da conversa é cada <Conversa>; aqui mora só o resumo.
   const [estadosSessao, setEstadosSessao] = useState<Record<string, EstadoSessao>>({});
   const [custoTotal, setCustoTotal] = useState(0);
+  /** Recados viajando pelos cabos agora. Cada um acende o seu por instantes. */
+  const [recados, setRecados] = useState<Recado[]>([]);
+  /** Cadeias que acabaram por limite. Ficam na tela até alguém fechar. */
+  const [cadeias, setCadeias] = useState<EventoCadeiaEncerrada[]>([]);
   // Quem está de fato respondendo. Vem do backend, não de uma constante daqui:
   // é ele que sabe se achou o Claude Code na máquina.
   const [agente, setAgente] = useState<{ adaptador: Adaptador; detalhe: string } | null>(null);
@@ -109,6 +124,12 @@ export default function App() {
 
   const nosPorId = useMemo(() => new Map((estado?.nos ?? []).map((n) => [n.id, n])), [estado]);
 
+  /** Id → nome, para a conversa dizer "Pesquisador pediu" em vez de um id. */
+  const nomesDosNos = useMemo(
+    () => Object.fromEntries((estado?.nos ?? []).map((n) => [n.id, n.nome])),
+    [estado],
+  );
+
   const registrarEstadoSessao = useCallback((nodeId: string, novo: EstadoSessao) => {
     // Devolver o mesmo objeto quando nada muda evita render em cascata: o
     // callback que dispara isto é recriado a cada render do App.
@@ -137,6 +158,46 @@ export default function App() {
       parar?.();
     };
   }, [estado]);
+
+  // Um nó falou com outro: acende o cabo. É o que torna a ponte visível em vez
+  // de mágica — sem isto, dois agentes conversam e a única pista é o texto
+  // aparecendo num nó que ninguém tocou.
+  useEffect(() => {
+    let vivo = true;
+    const paradas: Array<() => void> = [];
+    const registrar = (f: () => void) => (vivo ? paradas.push(f) : f());
+    const relogios: number[] = [];
+
+    escutar<EventoNoMensagem>("no:mensagem", (p) => {
+      const recado: Recado = {
+        chave: `${p.trace_id}:${p.de_node}:${p.para_node}:${Date.now()}`,
+        de: p.de_node,
+        para: p.para_node,
+        tipo: p.tipo_mensagem,
+      };
+      setRecados((v) => [...v, recado]);
+      // Some sozinho. Um cabo que fica aceso vira decoração, e decoração
+      // acesa não avisa mais nada.
+      relogios.push(
+        window.setTimeout(
+          () => setRecados((v) => v.filter((r) => r.chave !== recado.chave)),
+          DURACAO_RECADO_MS,
+        ),
+      );
+    }).then(registrar);
+
+    escutar<EventoCadeiaEncerrada>("cadeia:encerrada", (p) => {
+      // Nunca em silêncio: estourar um limite avisa em vez de queimar crédito
+      // calado. O aviso fica até o usuário fechar — ele custou dinheiro.
+      setCadeias((v) => (v.some((c) => c.trace_id === p.trace_id) ? v : [...v, p]));
+    }).then(registrar);
+
+    return () => {
+      vivo = false;
+      for (const f of paradas) f();
+      for (const r of relogios) window.clearTimeout(r);
+    };
+  }, []);
 
   // --------------------------------------------------------------- ações
 
@@ -381,7 +442,7 @@ export default function App() {
       <header className="barra">
         <div className="marca">
           Mutirão
-          <span className="versao">M2</span>
+          <span className="versao">M3</span>
         </div>
 
         <div className="ferramentas">
@@ -444,6 +505,7 @@ export default function App() {
             selecionado={selecionado}
             aoSelecionar={setSelecionado}
             provisorio={provisorio}
+            recados={recados}
           />
 
           {(estado?.nos ?? []).map((n) => (
@@ -453,6 +515,7 @@ export default function App() {
               selecionado={selecionado === n.id}
               estadoSessao={estadosSessao[n.id]}
               aoMudarEstadoSessao={(e) => registrarEstadoSessao(n.id, e)}
+              nomesDosNos={nomesDosNos}
               aoSelecionar={() => {
                 setSelecionado(n.id);
                 void ipc
@@ -498,6 +561,26 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Uma cadeia que estourou limite custou dinheiro e parou trabalho. Não
+          some sozinha como o cabo aceso: fica até o usuário ler e fechar. */}
+      {cadeias.length > 0 && (
+        <div className="cadeias-encerradas" role="alert">
+          {cadeias.map((c) => (
+            <div className="cadeia-encerrada" key={c.trace_id}>
+              <b>{nosPorId.get(c.node_id)?.nome ?? "Um nó"}</b> parou: {c.motivo}. O que já foi
+              feito continua na conversa.
+              <button
+                type="button"
+                className="cadeia-fechar"
+                onClick={() => setCadeias((v) => v.filter((x) => x.trace_id !== c.trace_id))}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <footer className="rodape">
         <span>arrastar fundo: mover · ctrl + rolar: zoom · duplo clique no título: renomear</span>

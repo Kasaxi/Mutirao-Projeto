@@ -4,6 +4,7 @@ import {
   aceitaRegra,
   ehErroIpc,
   formatarCusto,
+  nomeCompletoMcp,
   ROTULO_ESTADO,
   type ChamadaFerramenta,
   type Decisao,
@@ -32,13 +33,18 @@ interface Props {
   no: No;
   /** Sobe o estado para o cabeçalho do nó desenhar o ponto de atenção. */
   aoMudarEstado?: (estado: EstadoSessao) => void;
+  /**
+   * Nome de cada nó do canvas, para a bolha que veio de outro nó dizer de
+   * quem ela é. Sem isto ela mostraria um id, que não diz nada a ninguém.
+   */
+  nomesDosNos?: Record<string, string>;
 }
 
 type Item =
   | { chave: string; em: number; tipo: "mensagem"; mensagem: Mensagem }
   | { chave: string; em: number; tipo: "acao"; acao: ChamadaFerramenta };
 
-export function Conversa({ no, aoMudarEstado }: Props) {
+export function Conversa({ no, aoMudarEstado, nomesDosNos }: Props) {
   const [sessao, setSessao] = useState<Sessao | null>(null);
   const [estado, setEstado] = useState<EstadoSessao>("ocioso");
   const [mensagens, setMensagens] = useState<Mensagem[]>([]);
@@ -110,12 +116,19 @@ export function Conversa({ no, aoMudarEstado }: Props) {
 
   // -------------------------------------------------------------- eventos
 
+  // Cada releitura leva um número. Uma resposta que chega depois de outra
+  // releitura ter começado é descartada: sem isto, uma leitura lenta do começo
+  // do turno sobrescreveria a bolha que o fim do turno acabou de acrescentar.
+  const geracao = useRef(0);
+
   const recarregar = useCallback(async (sessionId: string) => {
+    const minha = ++geracao.current;
     try {
       const [h, a] = await Promise.all([
         ipc.historico(sessionId),
         ipc.acoesDaSessao(sessionId),
       ]);
+      if (geracao.current !== minha) return;
       setMensagens(h);
       setAcoes(a);
     } catch {
@@ -145,7 +158,15 @@ export function Conversa({ no, aoMudarEstado }: Props) {
 
     escutar<EventoEstado>("sessao:estado", (p) => {
       if (p.session_id !== idSessao) return;
-      setEstado(p.estado);
+      setEstado((antes) => {
+        // Um turno que começa sem o usuário ter escrito nada veio de outro nó,
+        // e a mensagem dele já está gravada — `iniciar_turno` grava ANTES de
+        // avisar o estado. Sem esta releitura o "Pesquisador pediu" só
+        // apareceria na próxima vez que alguém abrisse o nó, e quem estivesse
+        // olhando veria o Redator trabalhar sem nunca saber a mando de quem.
+        if (p.estado === "pensando" && antes !== "pensando") void recarregar(idSessao);
+        return p.estado;
+      });
       if (p.estado !== "pensando") setPensamento("");
     }).then(registrar);
 
@@ -252,7 +273,7 @@ export function Conversa({ no, aoMudarEstado }: Props) {
       vivo = false;
       for (const parar of paradas) parar();
     };
-  }, [sessao, limparParcial]);
+  }, [sessao, limparParcial, recarregar]);
 
   // --------------------------------------------------------------- rolagem
 
@@ -385,7 +406,7 @@ export function Conversa({ no, aoMudarEstado }: Props) {
 
           {itens.map((item) =>
             item.tipo === "mensagem" ? (
-              <Bolha key={item.chave} mensagem={item.mensagem} />
+              <Bolha key={item.chave} mensagem={item.mensagem} nomes={nomesDosNos} />
             ) : (
               <CardAcao key={item.chave} acao={item.acao} />
             ),
@@ -470,10 +491,30 @@ function rolarDentro(e: React.WheelEvent<HTMLDivElement>) {
   if (podeDescer || podeSubir) e.stopPropagation();
 }
 
-function Bolha({ mensagem }: { mensagem: Mensagem }) {
+function Bolha({
+  mensagem,
+  nomes,
+}: {
+  mensagem: Mensagem;
+  nomes?: Record<string, string>;
+}) {
   if (mensagem.papel === "sistema") {
     return <div className="aviso-sistema">{mensagem.conteudo}</div>;
   }
+
+  // Recado de outro nó. Tem cara própria de propósito: sem isto o usuário
+  // abriria o Redator e leria, do lado de quem escreve, um pedido que ele
+  // nunca fez — e concluiria que o agente inventou a tarefa sozinho.
+  if (mensagem.papel === "no") {
+    const quem = (mensagem.origem_node && nomes?.[mensagem.origem_node]) || "outro nó";
+    return (
+      <div className="bolha no" title={mensagem.trace_id ? `cadeia ${mensagem.trace_id}` : undefined}>
+        <span className="bolha-origem">{quem} pediu</span>
+        {mensagem.conteudo}
+      </div>
+    );
+  }
+
   const meu = mensagem.papel === "usuario";
   return (
     <div className={`bolha ${meu ? "usuario" : "agente"}`}>
@@ -515,11 +556,23 @@ const VERBOS: Record<string, string> = {
   Grep: "procurou por",
   Bash: "rodou",
   WebFetch: "buscou",
-  // Ferramentas do barramento do Mutirão (§6), que chegam no M3.
-  ler_nota: "leu a nota",
-  escrever_nota: "escreveu na nota",
-  enviar_para: "perguntou a",
-  avisar: "avisou",
+  // Ferramentas do barramento (§6). Os nomes chegam com o prefixo do servidor
+  // MCP, que é como o modelo as vê e como o hook de aprovação as nomeia —
+  // ver `ferramentas::nome_completo`.
+  ...Object.fromEntries(
+    Object.entries({
+      enviar_para: "perguntou a",
+      avisar: "avisou",
+      listar_nos: "olhou quem está ligado",
+      ler_nota: "leu a nota",
+      escrever_nota: "escreveu na nota",
+      listar_arquivos: "olhou a pasta",
+      ler_arquivo: "leu",
+      escrever_arquivo: "gravou",
+      perguntar_humano: "perguntou a você",
+      concluir: "entregou",
+    }).map(([n, v]) => [nomeCompletoMcp(n), v]),
+  ),
 };
 
 /**
@@ -552,7 +605,7 @@ function CardAprovacao({
             checked={lembrar}
             onChange={(e) => setLembrar(e.target.checked)}
           />
-          não perguntar de novo para {VERBOS[pedido.ferramenta] ?? pedido.ferramenta} nesta pasta
+          não perguntar de novo para {infinitivo(pedido.ferramenta)} nesta pasta
         </label>
       ) : (
         // Bash e WebFetch perguntam sempre. Dizer isso é melhor que só não
@@ -594,6 +647,23 @@ function CardAprovacao({
 
 function verbo(ferramenta: string): string {
   return VERBOS[ferramenta] ?? ferramenta;
+}
+
+/**
+ * O mesmo verbo no infinitivo, para a frase da caixa "não perguntar de novo".
+ * O card de ação conta o que já aconteceu ("gravou"); a caixa fala do que vai
+ * acontecer daqui em diante ("gravar"), e trocar os dois deixa a frase torta.
+ */
+const INFINITIVOS: Record<string, string> = {
+  Write: "gravar arquivo",
+  Edit: "alterar arquivo",
+  NotebookEdit: "alterar caderno",
+  [nomeCompletoMcp("escrever_nota")]: "escrever em nota",
+  [nomeCompletoMcp("escrever_arquivo")]: "gravar arquivo",
+};
+
+function infinitivo(ferramenta: string): string {
+  return INFINITIVOS[ferramenta] ?? ferramenta;
 }
 
 /** O argumento que o usuário reconhece: o caminho, o nome, o alvo. */

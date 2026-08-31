@@ -21,6 +21,8 @@ interface Props {
   aoLigar: (e: React.PointerEvent) => void;
   aoRenomear: (nome: string) => void;
   aoMudarEstadoSessao?: (estado: EstadoSessao) => void;
+  /** Nome de cada nó, para a bolha vinda de outro nó dizer de quem ela é. */
+  nomesDosNos?: Record<string, string>;
 }
 
 export function NoView({
@@ -33,6 +35,7 @@ export function NoView({
   aoLigar,
   aoRenomear,
   aoMudarEstadoSessao,
+  nomesDosNos,
 }: Props) {
   const [editando, setEditando] = useState(false);
 
@@ -84,7 +87,7 @@ export function NoView({
       </div>
 
       <div className="no-corpo">
-        <Corpo no={no} aoMudarEstadoSessao={aoMudarEstadoSessao} />
+        <Corpo no={no} aoMudarEstadoSessao={aoMudarEstadoSessao} nomesDosNos={nomesDosNos} />
       </div>
 
       {/* porta de ligação — arrastar daqui até outro nó cria um cabo */}
@@ -142,13 +145,16 @@ function CampoNome({ valor, aoConfirmar }: { valor: string; aoConfirmar: (v: str
 function Corpo({
   no,
   aoMudarEstadoSessao,
+  nomesDosNos,
 }: {
   no: No;
   aoMudarEstadoSessao?: (estado: EstadoSessao) => void;
+  /** Nome de cada nó, para a bolha vinda de outro nó dizer de quem ela é. */
+  nomesDosNos?: Record<string, string>;
 }) {
   switch (no.tipo) {
     case "agente":
-      return <Conversa no={no} aoMudarEstado={aoMudarEstadoSessao} />;
+      return <Conversa no={no} aoMudarEstado={aoMudarEstadoSessao} nomesDosNos={nomesDosNos} />;
     case "nota":
       return <Nota no={no} />;
     case "arquivos":

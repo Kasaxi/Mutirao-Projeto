@@ -19,7 +19,11 @@ import type {
   TipoNo,
   Workspace,
 } from "./tipos";
-import { FERRAMENTAS_QUE_ACEITAM_REGRA } from "./tipos";
+import {
+  FERRAMENTAS_MCP_QUE_GRAVAM,
+  FERRAMENTAS_QUE_ACEITAM_REGRA,
+  nomeCompletoMcp,
+} from "./tipos";
 
 // Camada única de acesso ao núcleo. Nenhum componente chama `invoke` direto:
 // assim o contrato IPC fica num arquivo só, e o modo navegador existe.
@@ -164,6 +168,18 @@ function semearArquivos() {
 /** Espelho de `barramento::FERRAMENTAS_QUE_PEDEM_LICENCA`. */
 const PEDEM_LICENCA = ["Write", "Edit", "NotebookEdit", "Bash", "WebFetch"];
 
+/**
+ * Espelho de `barramento::pede_licenca`: as nativas mais as do §6 que gravam.
+ * Se `escrever_nota` escapasse daqui, o modo navegador mostraria uma gravação
+ * passando sem card — e mentiria sobre o que o app de verdade faz.
+ */
+function pedeLicencaFalso(ferramenta: string): boolean {
+  return (
+    PEDEM_LICENCA.includes(ferramenta) ||
+    FERRAMENTAS_MCP_QUE_GRAVAM.some((f) => nomeCompletoMcp(f) === ferramenta)
+  );
+}
+
 /** Cards abertos: id da chamada -> quem destrava o turno quando o usuário clica. */
 const cardsAbertos = new Map<string, (d: Decisao) => void>();
 
@@ -251,6 +267,21 @@ function roteiroDemonstracao(pergunta: string): { atrasoMs: number; eventos: Eve
         resultado: { bytes: 74 },
         erro: null,
       },
+      // A ponte do M3: só acontece se houver um cabo `fala_com` para um nó com
+      // este nome. Sem cabo, o nó não existe — e aqui isso é literal, como no
+      // núcleo: `pontearFalso` devolve `null` e a chamada falha.
+      {
+        tipo: "ferramenta_pedida",
+        id: `fer_${t}_3`,
+        nome: nomeCompletoMcp("enviar_para"),
+        argumentos: { no: "Redator", mensagem: "Revise o resumo e confira o índice." },
+      },
+      {
+        tipo: "ferramenta_concluida",
+        id: `fer_${t}_3`,
+        resultado: { resposta: "Conferido: o índice foi extinto em 2023." },
+        erro: null,
+      },
       {
         tipo: "turno_concluido",
         texto_final:
@@ -325,20 +356,71 @@ function gravarMensagemFalsa(
   conteudo: string,
   tokens = 0,
   custo = 0,
+  origem: { node: string; trace: string } | null = null,
 ): Mensagem {
   const m: Mensagem = {
     id: id(),
     session_id: sessionId,
     papel,
-    origem_node: null,
+    origem_node: origem?.node ?? null,
     conteudo,
     tokens,
     custo,
-    trace_id: null,
+    trace_id: origem?.trace ?? null,
     criado_em: agora(),
   };
   mem.mensagens.push(m);
   return m;
+}
+
+/**
+ * A ponte do M3 no modo navegador.
+ *
+ * Duplica o `Orquestrador::entregar` de propósito, como o resto deste arquivo
+ * duplica o núcleo: sem isto, `npm run dev` mostraria um canvas onde os cabos
+ * nunca acendem, e a única feature nova do marco seria invisível fora do app.
+ * O que ele NÃO faz é a fila, os três limites e o escopo por cabo — isso é
+ * regra, e regra mora no Rust, com teste.
+ */
+function pontearFalso(s: Sessao, alvoNome: string): string | null {
+  const meu = mem.nos.find((n) => n.id === s.node_id);
+  if (!meu) return null;
+  const ligados = mem.cabos
+    .filter((c) => c.tipo === "fala_com" && (c.de_node === meu.id || c.para_node === meu.id))
+    .map((c) => (c.de_node === meu.id ? c.para_node : c.de_node));
+  const alvo = mem.nos.find((n) => ligados.includes(n.id) && n.nome === alvoNome);
+  if (!alvo) return null;
+
+  const trace = `tr_${id().slice(0, 8)}`;
+  emitirFalso("no:mensagem", {
+    tipo: "no_mensagem",
+    de_node: meu.id,
+    para_node: alvo.id,
+    trace_id: trace,
+    tipo_mensagem: "pedido",
+  });
+
+  // O recado entra na conversa do OUTRO nó, com quem falou e em que cadeia.
+  const sessaoAlvo = mem.sessoes.find((k) => k.node_id === alvo.id);
+  if (sessaoAlvo) {
+    gravarMensagemFalsa(
+      sessaoAlvo.id,
+      "no",
+      "Revise o resumo do contrato e me diga se o índice citado ainda existe.",
+      0,
+      0,
+      { node: meu.id, trace },
+    );
+    // A gravação vem ANTES do aviso de estado, na mesma ordem do
+    // `Orquestrador::iniciar_turno` — é dessa ordem que a face conversa
+    // depende para achar o recado quando relê o histórico.
+    mudarEstadoFalso(sessaoAlvo, "pensando");
+    window.setTimeout(() => {
+      gravarMensagemFalsa(sessaoAlvo.id, "agente", "Conferido: o índice foi extinto em 2023.");
+      mudarEstadoFalso(sessaoAlvo, "ocioso");
+    }, 500);
+  }
+  return alvo.nome;
 }
 
 /** Roda o roteiro, um evento por vez, respeitando o cancelamento. */
@@ -376,7 +458,7 @@ async function rodarTurnoFalso(s: Sessao, pergunta: string) {
       case "ferramenta_pedida": {
         const idChamada = `${s.id}:${evento.id}`;
         const wsId = mem.nos.find((n) => n.id === s.node_id)?.workspace_id ?? "";
-        const precisa = PEDEM_LICENCA.includes(evento.nome);
+        const precisa = pedeLicencaFalso(evento.nome);
         const regra = mem.regras.find(
           (r) => r.workspace_id === wsId && r.ferramenta === evento.nome,
         );
@@ -393,6 +475,15 @@ async function rodarTurnoFalso(s: Sessao, pergunta: string) {
           criado_em: agora(),
         };
         mem.acoes.push(acao);
+
+        // A ponte acende o cabo aqui, no pedido — é quando o recado sai, não
+        // quando a resposta volta.
+        if (evento.nome === nomeCompletoMcp("enviar_para")) {
+          const alvo = evento.argumentos.no;
+          if (typeof alvo !== "string" || pontearFalso(s, alvo) === null) {
+            acao.erro = `nó não encontrado: ${String(alvo)}`;
+          }
+        }
 
         if (acao.aprovacao === "pendente") {
           const [resumo, detalhe] = descreverFerramenta(evento.nome, evento.argumentos);

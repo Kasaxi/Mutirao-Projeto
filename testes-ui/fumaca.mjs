@@ -256,6 +256,51 @@ conferir("custo sobe para a barra do workspace", /US\$\s*0,0095/.test(custoBarra
 // Retrato do marco: um turno inteiro na tela, com ação, resposta e custo.
 await pagina.screenshot({ path: "testes-ui/conversa.png" });
 
+// ============================================================== M3 =========
+// "o Pesquisador entrega ao Redator sem eu tocar". A ponte só serve se der
+// para VER que ela existe: um cabo que acende e uma bolha que diz de quem veio
+// o pedido. Sem isso, o texto aparece num nó que ninguém tocou e o usuário
+// conclui que o agente inventou a tarefa sozinho.
+
+console.log("\nM3 — a ponte");
+
+// O recado sai logo depois da gravação aprovada, e o cabo fica aceso três
+// segundos — tempo de sobra para o turno terminar e o teste olhar.
+conferir(
+  "o cabo acende quando um nó fala com o outro",
+  (await pagina.locator(".cabo.falando").count()) === 1,
+  `${await pagina.locator(".cabo.falando").count()} cabo(s) aceso(s)`,
+);
+conferir(
+  "e o desenho distingue pedido de aviso",
+  (await pagina.locator('.cabo[data-falando="pedido"]').count()) === 1,
+);
+
+// Retrato do marco: a ponte no ato de atravessar.
+await pagina.screenshot({ path: "testes-ui/ponte.png" });
+
+// O recado chega ao outro nó com o nome de quem pediu — e chega sozinho, sem
+// ninguém reabrir o nó.
+const redator = pagina.locator(".no-agente").nth(1);
+await pagina.waitForSelector(".no-agente:nth-of-type(n) .bolha.no", { timeout: 5000 });
+const recado = await redator.locator(".bolha.no").first().innerText();
+conferir("o recado chega ao outro nó", recado.includes("índice"), recado.slice(0, 40));
+// `innerText` devolve o texto RENDERIZADO, e `.bolha-origem` tem
+// text-transform: uppercase. Comparar sem baixar a caixa falha por um motivo
+// que não é o que o teste quer medir — é a segunda vez que isto morde aqui.
+conferir(
+  "e diz de quem veio",
+  recado.toLowerCase().includes("pesquisador pediu"),
+  recado.split("\n")[0],
+);
+
+// O cabo não fica aceso para sempre: aceso o tempo todo vira decoração, e
+// decoração não avisa mais nada.
+await pagina.waitForFunction(() => document.querySelectorAll(".cabo.falando").length === 0, {
+  timeout: 6000,
+});
+conferir("o cabo apaga sozinho", true);
+
 // 19. face terminal: a mesma sessão, crua
 await agente.getByRole("button", { name: "terminal" }).click();
 await pagina.waitForTimeout(120);

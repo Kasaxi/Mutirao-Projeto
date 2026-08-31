@@ -181,6 +181,31 @@ button:focus-visible,
   pointer-events: none;
 }
 
+/* O recado viajando pelo cabo. Um traço curto correndo de uma ponta à outra:
+   diz "passou coisa por aqui" sem pedir atenção, como um cabo de rede
+   piscando. É o único sinal de que dois agentes conversaram — sem ele a
+   ponte vira mágica, e o texto aparece num nó que ninguém tocou. */
+.cabo-recado {
+  animation: correr-cabo 1.1s linear infinite;
+  opacity: 0.95;
+}
+
+/* `avisar` não espera resposta, e o desenho conta isso: passa mais rápido e
+   mais apagado que o `pedido`, que segura o nó de origem até voltar. */
+.cabo[data-falando="aviso"] .cabo-recado {
+  animation-duration: 0.7s;
+  opacity: 0.6;
+}
+
+@keyframes correr-cabo {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
 .vazio {
   position: absolute;
   inset: 0;
@@ -617,6 +642,27 @@ button.arvore-item:hover {
   color: var(--texto-apagado);
 }
 
+/* Recado que veio de outro nó. Cara própria de propósito: sem isto o usuário
+   abriria o Redator e leria, do lado de quem escreve, um pedido que ele nunca
+   fez — e concluiria que o agente inventou a tarefa sozinho. */
+.bolha.no {
+  align-self: flex-start;
+  max-width: 92%;
+  background: transparent;
+  border: 1px dashed var(--cabo-fala);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.bolha-origem {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--cabo-fala);
+}
+
 .pensamento {
   font-size: 11.5px;
   font-style: italic;
@@ -879,6 +925,46 @@ button.arvore-item:hover {
 .aviso {
   margin-left: auto;
   color: var(--perigo);
+  cursor: pointer;
+}
+
+/* ------------------------------------------------- cadeia que bateu no teto */
+
+/* Não some sozinha como o cabo aceso: uma cadeia que estourou limite custou
+   dinheiro e parou trabalho, então fica até alguém ler e fechar. */
+.cadeias-encerradas {
+  position: absolute;
+  right: 16px;
+  bottom: 44px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 380px;
+}
+
+.cadeia-encerrada {
+  position: relative;
+  padding: 8px 26px 8px 10px;
+  background: var(--superficie);
+  border: 1px solid var(--perigo);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--texto);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);
+}
+
+.cadeia-fechar {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  padding: 0 4px;
+  background: none;
+  border: 0;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--texto-apagado);
   cursor: pointer;
 }
 

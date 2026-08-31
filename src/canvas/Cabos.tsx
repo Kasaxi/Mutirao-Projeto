@@ -30,15 +30,35 @@ export function caminho(a: { x: number; y: number }, b: { x: number; y: number }
   return `M ${a.x} ${a.y} C ${a.x + alca * sentido} ${a.y}, ${b.x - alca * sentido} ${b.y}, ${b.x} ${b.y}`;
 }
 
+/**
+ * Um recado viajando por um cabo. `de`/`para` são ids de nó no sentido do
+ * recado — que pode ser o contrário do sentido em que o cabo foi desenhado,
+ * porque um cabo `fala_com` vale nos dois sentidos.
+ */
+export interface Recado {
+  chave: string;
+  de: string;
+  para: string;
+  tipo: "pedido" | "aviso";
+}
+
 interface Props {
   cabos: Cabo[];
   nos: Map<string, No>;
   selecionado: string | null;
   aoSelecionar: (id: string) => void;
   provisorio: { de: { x: number; y: number }; para: { x: number; y: number } } | null;
+  /** Recados em trânsito agora. Cada um acende o cabo por alguns segundos. */
+  recados?: Recado[];
 }
 
-export function Cabos({ cabos, nos, selecionado, aoSelecionar, provisorio }: Props) {
+export function Cabos({ cabos, nos, selecionado, aoSelecionar, provisorio, recados }: Props) {
+  const emTransito = new Map<string, Recado>();
+  for (const r of recados ?? []) {
+    emTransito.set(`${r.de}|${r.para}`, r);
+    emTransito.set(`${r.para}|${r.de}`, r);
+  }
+
   return (
     <svg className="cabos" width="1" height="1" aria-hidden="true">
       {cabos.map((c) => {
@@ -48,13 +68,15 @@ export function Cabos({ cabos, nos, selecionado, aoSelecionar, provisorio }: Pro
         const { de, para } = ancoras(a, b);
         const d = caminho(de, para);
         const ativo = selecionado === c.id;
+        const recado = emTransito.get(`${c.de_node}|${c.para_node}`);
         return (
           <g
             key={c.id}
-            className={ativo ? "cabo ativo" : "cabo"}
+            className={`cabo${ativo ? " ativo" : ""}${recado ? " falando" : ""}`}
             data-cabo-id={c.id}
             data-de={c.de_node}
             data-para={c.para_node}
+            data-falando={recado ? recado.tipo : undefined}
           >
             {/* trilho invisível e grosso: dá área de clique sem engrossar o desenho */}
             <path
@@ -75,6 +97,23 @@ export function Cabos({ cabos, nos, selecionado, aoSelecionar, provisorio }: Pro
               strokeDasharray={c.tipo === "fala_com" ? undefined : "6 5"}
               fill="none"
             />
+
+            {/* O recado em trânsito: um traço curto que corre pelo cabo, no
+                sentido do recado. Sem isto a ponte é mágica — dois nós
+                conversam e a única pista é o texto aparecendo em outro lugar.
+                O tracejado que anda é o mesmo truque do cabo de rede piscando:
+                diz "passou coisa por aqui" sem pedir atenção. */}
+            {recado && (
+              <path
+                className="cabo-recado"
+                d={recado.de === c.de_node ? d : caminho(para, de)}
+                stroke={COR[c.tipo]}
+                strokeWidth={3}
+                strokeDasharray="10 90"
+                strokeLinecap="round"
+                fill="none"
+              />
+            )}
           </g>
         );
       })}

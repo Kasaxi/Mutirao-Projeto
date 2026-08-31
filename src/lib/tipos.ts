@@ -227,6 +227,37 @@ export interface EventoAprovacaoDecidida {
   decidido_por: string;
 }
 
+// ============================================================ M3: a ponte ===
+
+export type TipoMensagem = "pedido" | "aviso";
+
+/**
+ * Um nó falou com outro. É o que faz a ponte ser visível em vez de mágica: o
+ * cabo acende no sentido do recado, e some sozinho.
+ *
+ * O campo é `tipo_mensagem`, e não `tipo`, porque `tipo` é o discriminante do
+ * próprio envelope — ver o comentário em `modelo.rs`.
+ */
+export interface EventoNoMensagem {
+  tipo: "no_mensagem";
+  de_node: string;
+  para_node: string;
+  trace_id: string;
+  tipo_mensagem: TipoMensagem;
+}
+
+/**
+ * Uma cadeia acabou por limite, não por conclusão. Sempre chega ao usuário: o
+ * `ARQUITETURA.md §6` é explícito em que estourar um limite avisa em vez de
+ * queimar crédito em silêncio.
+ */
+export interface EventoCadeiaEncerrada {
+  tipo: "cadeia_encerrada";
+  trace_id: string;
+  node_id: string;
+  motivo: string;
+}
+
 /**
  * Destas o usuário pode dizer "não perguntar de novo nesta pasta". Espelha
  * `barramento::FERRAMENTAS_QUE_ACEITAM_REGRA` — liberar `Bash` de uma vez
@@ -234,8 +265,22 @@ export interface EventoAprovacaoDecidida {
  */
 export const FERRAMENTAS_QUE_ACEITAM_REGRA = ["Write", "Edit", "NotebookEdit"];
 
+/** Espelho de `ferramentas::SERVIDOR`. Prefixo do nome que o modelo vê. */
+export const SERVIDOR_MCP = "mutirao";
+
+/** Espelho de `ferramentas::FERRAMENTAS_QUE_GRAVAM`, sem o prefixo. */
+export const FERRAMENTAS_MCP_QUE_GRAVAM = ["escrever_nota", "escrever_arquivo"];
+
+export function nomeCompletoMcp(ferramenta: string): string {
+  return `mcp__${SERVIDOR_MCP}__${ferramenta}`;
+}
+
+/** Espelho de `barramento::aceita_regra`: as nativas mais as do §6 que gravam. */
 export function aceitaRegra(ferramenta: string): boolean {
-  return FERRAMENTAS_QUE_ACEITAM_REGRA.includes(ferramenta);
+  return (
+    FERRAMENTAS_QUE_ACEITAM_REGRA.includes(ferramenta) ||
+    FERRAMENTAS_MCP_QUE_GRAVAM.some((f) => nomeCompletoMcp(f) === ferramenta)
+  );
 }
 
 export const ROTULO_ESTADO: Record<EstadoSessao, string> = {
