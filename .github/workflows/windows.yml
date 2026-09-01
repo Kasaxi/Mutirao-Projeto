@@ -1,0 +1,95 @@
+# O Mutirão numa máquina Windows de verdade.
+#
+# Todo o código foi escrito em Linux, e o app só roda no Windows. Este arquivo
+# é a ponte: uma máquina Windows compila, testa e monta o instalador a cada
+# push, e o que ela disser vale mais que qualquer raciocínio feito daqui.
+#
+# O que ele NÃO faz, de propósito: os testes ao vivo. Eles precisam da chave da
+# API, e a chave nunca entra no repositório nem no CI — é a Decisão 3 do
+# `ESPECIFICACAO.md §11`, e ela não abre exceção para conveniência.
+#
+# A ordem dos passos é do mais barato para o mais caro: typecheck, testes,
+# compilação da casca, fumaça, instalador. Quebrar cedo economiza minuto de
+# runner do Windows, que é o dobro do preço do Linux.
+
+name: Windows
+
+on:
+  push:
+    branches: [claude/arquivos-projeto-n2uggf, main]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    # O `tauri build` compila o Rust em release e ainda baixa o WiX para o MSI.
+    # Meia hora é folga; sem teto, um passo pendurado consome a cota inteira.
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # O Rust já vem na imagem do windows-latest. Atualizar é uma linha e
+      # evita compilar contra uma versão de meses atrás.
+      - name: Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      # Cache do alvo do Cargo. Sem isto, cada execução recompila as
+      # dependências do zero — o que num runner Windows são muitos minutos.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-windows-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-windows-
+
+      - run: npm ci
+
+      # 1. Typecheck e build do front. O mais barato de todos.
+      - name: Front (typecheck + build)
+        run: npm run build
+
+      # 2. Os 139 testes do núcleo, agora numa máquina Windows. É aqui que o
+      #    lado Windows do `processo.rs` sai do papel: `extensoes()` lê o
+      #    PATHEXT de verdade, e `achar` procura no PATH de verdade.
+      - name: Núcleo
+        run: cargo test -p nucleo
+
+      # 3. A PRIMEIRA compilação da casca Tauri no Windows. Até aqui ela só
+      #    passou por `cargo check` no Linux, que confere tipos e não linka
+      #    nada. Se alguma coisa deste projeto tinha de quebrar no Windows,
+      #    tem boa chance de ser neste passo.
+      - name: Casca Tauri
+        run: cargo build -p mutirao
+
+      # 4. Teste de fumaça da interface, no Chromium do Windows.
+      - name: Chromium do Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Fumaça
+        run: node testes-ui/fumaca.mjs
+
+      # 5. O instalador. É o entregável do M6, e sai daqui como artefato
+      #    baixável mesmo antes de existir assinatura de código.
+      - name: Instalador
+        run: npm run app:build
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: mutirao-instalador
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
