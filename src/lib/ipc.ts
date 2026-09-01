@@ -520,10 +520,30 @@ function pontearFalso(s: Sessao, alvoNome: string): string | null {
     // `Orquestrador::iniciar_turno` — é dessa ordem que a face conversa
     // depende para achar o recado quando relê o histórico.
     mudarEstadoFalso(sessaoAlvo, "pensando");
+
+    // O outro nó levanta a mão ANTES de responder. É o caminho que o núcleo
+    // percorre quando o destinatário chama `perguntar_humano` no meio de uma
+    // entrega — ver `Orquestrador::esperar_resposta` —, e reproduzi-lo aqui é
+    // o único jeito de a interface do aviso ser exercitada fora do app.
+    //
+    // Sem atraso nenhum, de propósito: no app o intervalo é o tempo de o
+    // agente pensar, mas aqui um atraso vira corrida com o teste de fumaça —
+    // e teste que passa nove vezes em dez é pior que teste vermelho.
+    mudarEstadoFalso(sessaoAlvo, "aguardando_humano");
+    emitirFalso("cadeia:espera-pessoa", {
+      tipo: "cadeia_espera_pessoa",
+      trace_id: trace,
+      node_id: meu.id,
+      perguntou_node: alvo.id,
+      perguntou_nome: alvo.nome,
+    });
+
     window.setTimeout(() => {
       gravarMensagemFalsa(sessaoAlvo.id, "agente", "Conferido: o índice foi extinto em 2023.");
+      // Sair de `aguardando_humano` é o que apaga o aviso, no falso como no
+      // app: quem limpa é o evento de estado, não um relógio.
       mudarEstadoFalso(sessaoAlvo, "ocioso");
-    }, 500);
+    }, 4000);
   }
   return alvo.nome;
 }

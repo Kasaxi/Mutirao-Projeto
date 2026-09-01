@@ -18,7 +18,7 @@ use crate::erro::{Erro, Resultado};
 use crate::modelo::*;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -332,16 +332,7 @@ impl Orquestrador {
         }
         self.avisar_estado(&de.id, &de.node_id, EstadoSessao::AguardandoNo);
 
-        let resposta = match espera.recv_timeout(Duration::from_millis(prazo_ms)) {
-            Ok(r) => r,
-            Err(RecvTimeoutError::Timeout) => Err(Erro::invalido(format!(
-                "o nó não respondeu em {} minutos",
-                prazo_ms / 60_000
-            ))),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(Erro::invalido("o nó encerrou sem responder"))
-            }
-        };
+        let resposta = self.esperar_resposta(&espera, de, &destino, &trace, prazo_ms);
 
         if let Ok(mut b) = self.bloqueados.lock() {
             b.remove(&de.id);
@@ -354,6 +345,81 @@ impl Orquestrador {
         self.avisar_estado(&de.id, &de.node_id, EstadoSessao::Pensando);
 
         resposta.map(Some)
+    }
+
+    /// Espera a resposta do outro nó, **sem contar o tempo em que a pessoa é
+    /// que está pensando**.
+    ///
+    /// O prazo existe para pegar nó travado. Enquanto o destinatário está de
+    /// mão levantada — `perguntar_humano` aberto — nada está travado: alguém
+    /// precisa responder. Deixar o relógio correr aí faria a cadeia morrer aos
+    /// dez minutos por causa de um café, e todo o trabalho da cadeia iria
+    /// junto.
+    ///
+    /// Não é espera sem fim: `perguntar_humano` tem teto de meia hora, e
+    /// quando ele estoura o outro lado falha e solta este aqui.
+    ///
+    /// Medido ao vivo, e foi o que motivou tudo isto: o Pesquisador esperando
+    /// o Redator, o Redator perguntando à pessoa, e a tela mostrando dois nós
+    /// calados por dez minutos — o `um_ciclo_entre_dois_nos_encerra_sozinho`
+    /// batia exatamente aqui.
+    fn esperar_resposta(
+        self: &Arc<Self>,
+        espera: &Receiver<Resultado<String>>,
+        de: &Sessao,
+        destino: &Sessao,
+        trace: &Trace,
+        prazo_ms: u64,
+    ) -> Resultado<String> {
+        // A fatia é curta para o aviso sair logo depois da pergunta, e não
+        // custa nada: acordar quatro vezes por segundo para olhar um mapa.
+        const FATIA: Duration = Duration::from_millis(250);
+        let mut restante = Duration::from_millis(prazo_ms);
+        let mut avisou = false;
+
+        loop {
+            match espera.recv_timeout(FATIA) {
+                Ok(r) => return r,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(Erro::invalido("o nó encerrou sem responder"))
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+
+            if self.tem_pergunta_aberta(&destino.id) {
+                // Relógio parado. E dito em voz alta uma vez só — repetir a
+                // cada fatia entupiria a tela com o mesmo aviso.
+                if !avisou {
+                    avisou = true;
+                    let nome = self
+                        .banco()
+                        .ok()
+                        .and_then(|b| b.obter_no(&destino.node_id).ok())
+                        .map(|n| n.nome)
+                        .unwrap_or_default();
+                    (self.sink)(EventoNucleo::CadeiaEsperaPessoa {
+                        trace_id: trace.id.clone(),
+                        node_id: de.node_id.clone(),
+                        perguntou_node: destino.node_id.clone(),
+                        perguntou_nome: nome,
+                    });
+                }
+                continue;
+            }
+
+            restante = restante.saturating_sub(FATIA);
+            if restante.is_zero() {
+                return Err(Erro::invalido(format!(
+                    "o nó não respondeu em {} minutos",
+                    prazo_ms / 60_000
+                )));
+            }
+        }
+    }
+
+    /// Aquela sessão está de mão levantada, esperando a pessoa?
+    fn tem_pergunta_aberta(&self, session_id: &str) -> bool {
+        self.perguntas.lock().map(|p| p.contains_key(session_id)).unwrap_or(false)
     }
 
     /// O agente perguntou alguma coisa a quem está na frente da tela.
@@ -470,16 +536,50 @@ impl Orquestrador {
                 ))
             })?;
 
+            let recrutador = banco.obter_no(&de.node_id)?;
+
             // Só nome de NÓ conflita. Papel e nó vivem em espaços de nome
             // diferentes, e chamar o agente de "Redator" porque ele é o
             // Redator é a coisa mais natural que existe.
-            if ja_existe_no(&banco, workspace_id, nome) {
+            //
+            // Recrutar de novo quem você já recrutou **não é erro**: é a mesma
+            // pessoa, e devolvê-la é o que o modelo queria. Medido ao vivo:
+            // com erro no lugar disto, o Organizador contornava inventando
+            // "Bruno2" — um nó a mais no canvas, turnos queimados e um time
+            // com dois Brunos. Ferramenta que o modelo repete tem de ser
+            // idempotente, senão ele inventa o contorno.
+            if let Some(ja) = quem_se_chama(&banco, workspace_id, nome) {
+                let meu = ja.recrutado_por.as_deref() == Some(recrutador.id.as_str());
+                let mesmo_papel = ja.role_id.as_deref() == Some(papel.id.as_str());
+
+                // Mesma pessoa com o mesmo papel: é literalmente o que ele
+                // pediu, e já está aqui. Devolve e pronto.
+                if meu && mesmo_papel {
+                    return Ok(ja.nome);
+                }
+
+                // Daqui para baixo é recusa, e a mensagem precisa dizer **quem
+                // é** quem já ocupa o nome. Sem isso o modelo só sabe que o
+                // nome falhou, e o contorno óbvio é acrescentar um número.
+                let papel_de_la = ja
+                    .role_id
+                    .as_deref()
+                    .and_then(|id| banco.obter_papel(id).ok())
+                    .map(|p| p.nome)
+                    .unwrap_or_else(|| "sem papel".into());
+                let de_quem = if meu {
+                    "que você já recrutou".to_string()
+                } else {
+                    "que não foi você quem recrutou".to_string()
+                };
                 return Err(Erro::invalido(format!(
-                    "já existe alguém chamado \"{nome}\" aqui; escolha outro nome"
+                    "já existe um \"{nome}\" aqui, {de_quem}, com o papel {papel_de_la}. \
+                     Fale com essa pessoa por enviar_para, ou escolha um nome de verdade \
+                     diferente — acrescentar número ao mesmo nome só cria dois agentes \
+                     parecidos, e depois ninguém sabe com qual está falando."
                 )));
             }
 
-            let recrutador = banco.obter_no(&de.node_id)?;
             let (x, y) = lugar_para_o_novo(&banco, &recrutador);
             let no = banco.criar_no_recrutado(
                 workspace_id,
@@ -861,12 +961,13 @@ impl Orquestrador {
 /// Nome duplicado não é detalhe estético: `enviar_para` resolve o vizinho pelo
 /// nome, e dois iguais viram o erro "há mais de um nó chamado X" na hora em
 /// que o time tenta trabalhar. Melhor recusar ao recrutar.
-fn ja_existe_no(banco: &Banco, workspace_id: &str, nome: &str) -> bool {
+fn quem_se_chama(banco: &Banco, workspace_id: &str, nome: &str) -> Option<No> {
     let procurado = nome.trim().to_lowercase();
     banco
         .listar_nos(workspace_id)
-        .map(|nos| nos.iter().any(|n| n.nome.trim().to_lowercase() == procurado))
-        .unwrap_or(false)
+        .ok()?
+        .into_iter()
+        .find(|n| n.nome.trim().to_lowercase() == procurado)
 }
 
 /// Onde pôr o recrutado.

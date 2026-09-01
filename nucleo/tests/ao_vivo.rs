@@ -433,6 +433,45 @@ impl Dupla {
         false
     }
 
+    /// Espera os dois pararem, **respondendo como a pessoa responderia**.
+    ///
+    /// Um agente que levanta a mão não é travamento: é uma pergunta, e no app
+    /// existe alguém na frente da tela para respondê-la. Sem isto o teste
+    /// mediria uma situação que o app não tem — um canvas sem ninguém — e foi
+    /// exatamente onde ele quebrou: o Pesquisador esperando o Redator, o
+    /// Redator esperando uma pessoa que o teste nunca fingiu ser.
+    ///
+    /// Devolve também quantas perguntas apareceram, porque o desfecho muda de
+    /// significado conforme elas existam ou não.
+    fn esperar_os_dois_com_gente(&self, limite: Duration) -> (bool, usize) {
+        let inicio = Instant::now();
+        let mut perguntas = 0;
+        while inicio.elapsed() < limite {
+            for s in [&self.a, &self.b] {
+                if self.estado(s) != EstadoSessao::AguardandoHumano {
+                    continue;
+                }
+                perguntas += 1;
+                let _ = self.orq.enviar(s, "Decida você, com o que já tem.");
+                // Espera sair de `aguardando_humano` antes de olhar de novo.
+                // Sem isto, a mesma pergunta seria respondida duas vezes — e a
+                // segunda mensagem não é resposta, é turno novo.
+                let ate = Instant::now();
+                while self.estado(s) == EstadoSessao::AguardandoHumano
+                    && ate.elapsed() < Duration::from_secs(10)
+                {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            let parado = |e| matches!(e, EstadoSessao::Ocioso | EstadoSessao::Erro);
+            if parado(self.estado(&self.a)) && parado(self.estado(&self.b)) {
+                return (true, perguntas);
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        (false, perguntas)
+    }
+
     fn conversa(&self, sessao: &str) -> Vec<nucleo::Mensagem> {
         self.banco.lock().unwrap().historico(sessao, 50).unwrap()
     }
@@ -525,6 +564,12 @@ fn um_ciclo_entre_dois_nos_encerra_sozinho() {
     // teimoso e falha se a checagem for removida. Aqui a pergunta é outra, e é
     // a que só a CLI de verdade responde: com dois processos de verdade
     // conversando, o app trava?
+    //
+    // E ele **finge ser a pessoa**, o que antes não fazia. O terceiro desfecho
+    // possível é o Redator chamar `perguntar_humano` em vez de responder — e
+    // aí a cadeia para de propósito, esperando um clique que num teste sem
+    // gente nunca vem. Foi assim que este teste passou a falhar, e a falha era
+    // do teste: media um canvas sem ninguém na frente, que não é o produto.
     let d = dupla();
     d.orq
         .enviar(
@@ -536,13 +581,14 @@ fn um_ciclo_entre_dois_nos_encerra_sozinho() {
         .unwrap();
 
     let inicio = Instant::now();
+    let (parou, perguntas) = d.esperar_os_dois_com_gente(Duration::from_secs(420));
     assert!(
-        d.esperar_os_dois(Duration::from_secs(420)),
+        parou,
         "travou: Pesquisador em {:?}, Redator em {:?}",
         d.estado(&d.a),
         d.estado(&d.b)
     );
-    println!("a cadeia encerrou em {:?}", inicio.elapsed());
+    println!("a cadeia encerrou em {:?}, com {perguntas} pergunta(s) à pessoa", inicio.elapsed());
 
     // O prazo padrão de uma mensagem é de dez minutos. Se foi o prazo que
     // desatou isto, não encerrou sozinho — expirou.
@@ -622,19 +668,46 @@ impl Maestro {
     }
 
     /// Espera TODOS os nós pararem. Um só parado não prova nada num time.
+    ///
+    /// **Responde como a pessoa responderia.** Qualquer membro do time pode
+    /// levantar a mão, e um time de quatro tem quatro chances de fazer isso.
+    /// Sem responder, o teste mede um canvas sem ninguém na frente — que não é
+    /// o produto — e fica esperando um clique que nunca vem. É a mesma
+    /// correção do `esperar_os_dois_com_gente`, e pelo mesmo motivo: desde que
+    /// a espera por pergunta não conta contra o prazo (`esperar_resposta`), o
+    /// teste sem gente para de terminar em vez de terminar errado.
     fn esperar_o_time(&self, limite: Duration) -> bool {
         let inicio = Instant::now();
         while inicio.elapsed() < limite {
-            let banco = self.banco.lock().unwrap();
-            let todos_parados = banco
-                .listar_nos(&self.ws)
-                .unwrap()
+            let sessoes: Vec<nucleo::Sessao> = {
+                let banco = self.banco.lock().unwrap();
+                banco
+                    .listar_nos(&self.ws)
+                    .unwrap()
+                    .iter()
+                    .filter(|n| n.tipo == TipoNo::Agente)
+                    .filter_map(|n| banco.sessao_do_no(&n.id).ok().flatten())
+                    .collect()
+            };
+
+            for s in sessoes.iter().filter(|s| s.estado == EstadoSessao::AguardandoHumano) {
+                let _ = self.orq.enviar(&s.id, "Decida você, com o que já tem.");
+                // Espera sair de `aguardando_humano`: a segunda mensagem a uma
+                // sessão que já respondeu não é resposta, é turno novo.
+                let ate = Instant::now();
+                while ate.elapsed() < Duration::from_secs(10) {
+                    let agora = self.banco.lock().unwrap().obter_sessao(&s.id).unwrap().estado;
+                    if agora != EstadoSessao::AguardandoHumano {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+
+            if sessoes
                 .iter()
-                .filter(|n| n.tipo == TipoNo::Agente)
-                .filter_map(|n| banco.sessao_do_no(&n.id).ok().flatten())
-                .all(|s| matches!(s.estado, EstadoSessao::Ocioso | EstadoSessao::Erro));
-            drop(banco);
-            if todos_parados {
+                .all(|s| matches!(s.estado, EstadoSessao::Ocioso | EstadoSessao::Erro))
+            {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(300));
@@ -664,11 +737,34 @@ fn um_prompt_monta_um_time() {
         )
         .unwrap();
 
-    assert!(
-        m.esperar_o_time(Duration::from_secs(500)),
-        "o time não parou; agentes: {:?}",
-        m.agentes().iter().map(|n| &n.nome).collect::<Vec<_>>()
-    );
+    // Quinze minutos, e não os cinco de antes. Medido em quatro execuções: 176 s
+    // com um time de três, 478 s com um de cinco. O Organizador decide sozinho
+    // quantos recrutar — o prompt pede dois e ele às vezes traz quatro —, e cada
+    // agente a mais é um turno a mais. Cinco minutos cabia no caso bom e
+    // estourava no caso normal, o que faz o teste falhar por orçamento e não
+    // por defeito. Quem impede o time de crescer sem fim são os tetos de
+    // recrutamento, com teste offline próprio; não é papel do relógio daqui.
+    if !m.esperar_o_time(Duration::from_secs(900)) {
+        // Diagnóstico, não decoração: "o time não parou" sozinho não diz se
+        // alguém travou, se alguém está esperando, ou se o Chefe entrou em
+        // laço de recrutar. Sem isto a próxima investigação recomeça do zero.
+        let banco = m.banco.lock().unwrap();
+        for n in m.agentes() {
+            let s = banco.sessao_do_no(&n.id).ok().flatten();
+            let estado = s.as_ref().map(|s| format!("{:?}", s.estado)).unwrap_or("—".into());
+            let ultima = s
+                .as_ref()
+                .and_then(|s| banco.historico(&s.id, 3).ok())
+                .and_then(|h| h.last().map(|m| m.conteudo.chars().take(120).collect::<String>()))
+                .unwrap_or_default();
+            println!("  {} [{}] papel={:?} — {}", n.nome, estado, n.role_id.is_some(), ultima);
+        }
+        drop(banco);
+        panic!(
+            "o time não parou; agentes: {:?}",
+            m.agentes().iter().map(|n| &n.nome).collect::<Vec<_>>()
+        );
+    }
 
     let agentes = m.agentes();
     println!("time montado: {:?}", agentes.iter().map(|n| &n.nome).collect::<Vec<_>>());

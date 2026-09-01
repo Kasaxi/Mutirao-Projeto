@@ -19,8 +19,10 @@ import {
   type EstadoCanvas,
   type EstadoSessao,
   type EventoCadeiaEncerrada,
+  type EventoCadeiaEsperaPessoa,
   type EventoCanvasMudou,
   type EventoCusto,
+  type EventoEstado,
   type EventoNoMensagem,
   type No,
   type Papel,
@@ -61,6 +63,7 @@ export default function App() {
   const [recados, setRecados] = useState<Recado[]>([]);
   /** Cadeias que acabaram por limite. Ficam na tela até alguém fechar. */
   const [cadeias, setCadeias] = useState<EventoCadeiaEncerrada[]>([]);
+  const [esperas, setEsperas] = useState<EventoCadeiaEsperaPessoa[]>([]);
   /** A biblioteca de papéis, carregada uma vez. */
   const [papeis, setPapeis] = useState<Papel[]>([]);
   const [times, setTimes] = useState<Partitura[]>([]);
@@ -197,6 +200,20 @@ export default function App() {
       // Nunca em silêncio: estourar um limite avisa em vez de queimar crédito
       // calado. O aviso fica até o usuário fechar — ele custou dinheiro.
       setCadeias((v) => (v.some((c) => c.trace_id === p.trace_id) ? v : [...v, p]));
+    }).then(registrar);
+
+    escutar<EventoCadeiaEsperaPessoa>("cadeia:espera-pessoa", (p) => {
+      // A fila inteira depende de um clique, e sem isto o canvas mostra dois
+      // nós calados — um "pensando", outro "aguardando" — sem dizer que um é
+      // consequência do outro.
+      setEsperas((v) => (v.some((c) => c.trace_id === p.trace_id) ? v : [...v, p]));
+    }).then(registrar);
+
+    escutar<EventoEstado>("sessao:estado", (p) => {
+      // Respondida a pergunta, o aviso vai embora sozinho. Aviso que fica
+      // depois de resolvido é pior que aviso nenhum: ensina a ignorar.
+      if (p.estado === "aguardando_humano") return;
+      setEsperas((v) => v.filter((c) => c.perguntou_node !== p.node_id));
     }).then(registrar);
 
     return () => {
@@ -701,25 +718,58 @@ export default function App() {
         )}
       </div>
 
-      {/* Uma cadeia que estourou limite custou dinheiro e parou trabalho. Não
-          some sozinha como o cabo aceso: fica até o usuário ler e fechar. */}
-      {cadeias.length > 0 && (
-        <div className="cadeias-encerradas" role="alert">
-          {cadeias.map((c) => (
-            <div className="cadeia-encerrada" key={c.trace_id}>
-              <b>{nosPorId.get(c.node_id)?.nome ?? "Um nó"}</b> parou: {c.motivo}. O que já foi
-              feito continua na conversa.
-              <button
-                type="button"
-                className="cadeia-fechar"
-                onClick={() => setCadeias((v) => v.filter((x) => x.trace_id !== c.trace_id))}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="avisos-canto">
+        {/* Uma cadeia que estourou limite custou dinheiro e parou trabalho. Não
+            some sozinha como o cabo aceso: fica até o usuário ler e fechar. */}
+        {cadeias.length > 0 && (
+          <div className="cadeias-encerradas" role="alert">
+            {cadeias.map((c) => (
+              <div className="cadeia-encerrada" key={c.trace_id}>
+                <b>{nosPorId.get(c.node_id)?.nome ?? "Um nó"}</b> parou: {c.motivo}. O que já foi
+                feito continua na conversa.
+                <button
+                  type="button"
+                  className="cadeia-fechar"
+                  onClick={() => setCadeias((v) => v.filter((x) => x.trace_id !== c.trace_id))}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* A cadeia não travou: alguém precisa responder. Tom diferente do aviso
+            de limite, e com um caminho até o nó que está de mão levantada. */}
+        {esperas.length > 0 && (
+          <div className="esperas-pessoa" role="status">
+            {esperas.map((c) => (
+              <div className="espera-pessoa" key={c.trace_id}>
+                {/* A frase inteira num span só: o container é flex, e sem
+                    isto cada trecho de texto vira um item com `gap` entre
+                    ele e o próximo — a frase sai picotada. */}
+                <span className="espera-texto">
+                  <b>{nosPorId.get(c.node_id)?.nome ?? "Um nó"}</b> está esperando{" "}
+                  <b>{c.perguntou_nome}</b>, que fez uma pergunta a você.
+                </span>
+                <button
+                  type="button"
+                  className="espera-ver"
+                  onClick={() => {
+                    const no = nosPorId.get(c.perguntou_node);
+                    const area = areaRef.current;
+                    if (!no || !area) return;
+                    setSelecionado(no.id);
+                    setVp(enquadrar([no], area.clientWidth, area.clientHeight));
+                  }}
+                >
+                  ver
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <footer className="rodape">
         <span>arrastar fundo: mover · ctrl + rolar: zoom · duplo clique no título: renomear</span>

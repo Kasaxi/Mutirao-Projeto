@@ -1003,7 +1003,10 @@ button.arvore-item:hover {
 
 /* Não some sozinha como o cabo aceso: uma cadeia que estourou limite custou
    dinheiro e parou trabalho, então fica até alguém ler e fechar. */
-.cadeias-encerradas {
+/* Os avisos de canto empilham num container só. Dois blocos absolutos no
+   mesmo canto se sobrepõem, e o de baixo some sob o de cima justamente
+   quando os dois têm algo a dizer. */
+.avisos-canto {
   position: absolute;
   right: 16px;
   bottom: 44px;
@@ -1012,6 +1015,13 @@ button.arvore-item:hover {
   flex-direction: column;
   gap: 6px;
   max-width: 380px;
+}
+
+.cadeias-encerradas,
+.esperas-pessoa {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .cadeia-encerrada {
@@ -1168,4 +1178,38 @@ button.arvore-item:hover {
 .publicar-falta {
   font-size: 11.5px;
   color: var(--perigo);
+}
+
+/* A cadeia parou numa pergunta. Não é erro, e por isso não usa `--perigo`:
+   o âmbar do acento é o mesmo do cabo `fala_com`, que é exatamente a relação
+   que este aviso está descrevendo. Fica logo acima do aviso de limite. */
+.espera-pessoa {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--superficie);
+  border: 1px solid var(--acento);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--texto);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);
+}
+
+.espera-ver {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 2px 8px;
+  background: var(--acento-fraco);
+  border: 1px solid var(--acento);
+  border-radius: 6px;
+  color: var(--texto);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.espera-ver:hover {
+  background: var(--acento);
+  color: var(--area);
 }

@@ -1938,6 +1938,195 @@ mod testes {
         assert!(conversa.iter().any(|m| m.conteudo.contains("velho · novo")), "{conversa:?}");
     }
 
+    /// Um adaptador que, ao receber turno, levanta a mão para a pessoa em vez
+    /// de responder. É o que o Redator fez ao vivo e derrubou o
+    /// `um_ciclo_entre_dois_nos_encerra_sozinho`.
+    struct FabricaPerguntadora {
+        orq: Arc<Mutex<Option<Arc<Orquestrador>>>>,
+        banco: Arc<Mutex<Banco>>,
+    }
+
+    struct AdaptadorPerguntador {
+        orq: Arc<Mutex<Option<Arc<Orquestrador>>>>,
+        banco: Arc<Mutex<Banco>>,
+        session_id: String,
+        node_id: String,
+    }
+
+    impl Fabrica for FabricaPerguntadora {
+        fn criar(&self, _a: Adaptador, ctx: &ContextoSessao) -> Resultado<Box<dyn AgenteAdapter>> {
+            Ok(Box::new(AdaptadorPerguntador {
+                orq: self.orq.clone(),
+                banco: self.banco.clone(),
+                session_id: ctx.session_id.clone(),
+                node_id: ctx.node_id.clone(),
+            }))
+        }
+    }
+
+    impl AgenteAdapter for AdaptadorPerguntador {
+        fn turno(&mut self, _texto: &str) -> Resultado<std::sync::mpsc::Receiver<EventoAgente>> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let orq = self.orq.lock().unwrap().clone().expect("orquestrador ligado");
+            let banco = self.banco.clone();
+            let session_id = self.session_id.clone();
+            // Só o Redator pergunta; o Pesquisador é quem espera.
+            let pergunta = self.node_id.clone();
+
+            std::thread::spawn(move || {
+                let sessao = banco.lock().unwrap().obter_sessao(&session_id).unwrap();
+                let nome = banco.lock().unwrap().obter_no(&pergunta).unwrap().nome;
+                let final_ = if nome == "Redator" {
+                    match ferramentas::executar(
+                        &orq,
+                        &banco,
+                        &sessao,
+                        "perguntar_humano",
+                        &json!({ "pergunta": "uso o índice velho ou o novo?" }),
+                    ) {
+                        Ok(v) => format!("a pessoa disse: {}", v["resposta"]),
+                        Err(e) => format!("ninguém respondeu: {e}"),
+                    }
+                } else {
+                    "nada a fazer".to_string()
+                };
+                let _ = tx.send(EventoAgente::TurnoConcluido {
+                    texto_final: final_,
+                    uso: Uso::default(),
+                });
+            });
+            Ok(rx)
+        }
+
+        fn cancelar(&mut self) {}
+    }
+
+    #[test]
+    fn quem_espera_nao_morre_no_prazo_enquanto_a_pessoa_pensa() {
+        // Medido ao vivo, e é o que derrubava o teste do ciclo: o Pesquisador
+        // esperando o Redator, o Redator perguntando à pessoa. Nenhum dos
+        // limites pega — e nem deveria, porque nada travou: alguém precisa
+        // responder. O que não pode é o relógio da entrega correr contra o
+        // tempo de quem está pensando, e a cadeia inteira morrer por causa de
+        // um café.
+        let celula: Arc<Mutex<Option<Arc<Orquestrador>>>> = Arc::new(Mutex::new(None));
+        let pasta = Pasta::nova();
+        let banco = Banco::em_memoria().unwrap();
+        let ws = banco.criar_workspace("Obra", pasta.0.to_str().unwrap()).unwrap();
+        let a = banco.criar_no(&ws.id, TipoNo::Agente, "Pesquisador", 0.0, 0.0).unwrap();
+        let b = banco.criar_no(&ws.id, TipoNo::Agente, "Redator", 300.0, 0.0).unwrap();
+        banco.criar_cabo(&ws.id, &a.id, &b.id, TipoCabo::FalaCom).unwrap();
+        let banco = Arc::new(Mutex::new(banco));
+
+        let avisos: Arc<Mutex<Vec<EventoNucleo>>> = Arc::new(Mutex::new(Vec::new()));
+        let copia = avisos.clone();
+        let sink: Sink = Arc::new(move |e| copia.lock().unwrap().push(e));
+
+        let fabrica: Arc<dyn Fabrica> =
+            Arc::new(FabricaPerguntadora { orq: celula.clone(), banco: banco.clone() });
+        let orq = Arc::new(Orquestrador::novo(banco.clone(), fabrica, sink));
+        *celula.lock().unwrap() = Some(orq.clone());
+
+        let sessao_a = orq.abrir_sessao(&a.id, Adaptador::Falso).unwrap();
+        banco.lock().unwrap().mudar_estado_sessao(&sessao_a.id, EstadoSessao::Pensando).unwrap();
+
+        // Prazo curto de propósito: com o relógio correndo, a entrega morreria
+        // em um segundo. É a sabotagem do teste embutida no próprio teste.
+        let entrega = {
+            let (orq, banco, sessao_a) = (orq.clone(), banco.clone(), sessao_a.clone());
+            std::thread::spawn(move || {
+                ferramentas::executar(
+                    &orq,
+                    &banco,
+                    &sessao_a,
+                    "enviar_para",
+                    &json!({ "no": "Redator", "mensagem": "faça a sua parte", "prazo_ms": 1000 }),
+                )
+            })
+        };
+
+        // O Redator levanta a mão.
+        assert!(
+            esperar(|| {
+                let banco = banco.lock().unwrap();
+                banco
+                    .sessao_do_no(&b.id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.estado == EstadoSessao::AguardandoHumano)
+            }),
+            "o Redator não chegou a perguntar"
+        );
+
+        // Muito depois do prazo de um segundo, a entrega continua de pé.
+        std::thread::sleep(Duration::from_millis(2500));
+        assert!(
+            !entrega.is_finished(),
+            "a entrega morreu no prazo enquanto a pessoa ainda decidia"
+        );
+
+        // E a tela foi avisada de quem depende de quem — senão o canvas mostra
+        // dois nós calados e ninguém sabe que a fila espera um clique.
+        let avisou = avisos.lock().unwrap().iter().any(|e| {
+            matches!(
+                e,
+                EventoNucleo::CadeiaEsperaPessoa { node_id, perguntou_nome, .. }
+                    if node_id == &a.id && perguntou_nome == "Redator"
+            )
+        });
+        assert!(avisou, "ninguém avisou que a cadeia parou numa pergunta");
+
+        // A pessoa responde, e a cadeia anda.
+        let sessao_b = banco.lock().unwrap().sessao_do_no(&b.id).unwrap().unwrap();
+        orq.enviar(&sessao_b.id, "o novo").unwrap();
+        let r = entrega.join().unwrap().expect("a entrega devia ter dado certo");
+        assert!(
+            r.to_string().contains("o novo"),
+            "a resposta da pessoa não voltou pela cadeia: {r}"
+        );
+    }
+
+    #[test]
+    fn recrutar_de_novo_devolve_quem_ja_existe_em_vez_de_um_bruno2() {
+        // Medido ao vivo: com erro no lugar disto, o Organizador contornava o
+        // nome ocupado inventando "Bruno2" — um nó a mais no canvas, turnos
+        // queimados, e um time com dois Brunos em que ninguém sabe com qual
+        // está falando. Ferramenta que o modelo repete tem de ser idempotente.
+        let e = elenco();
+        let primeiro =
+            e.usar("recrutar", json!({ "papel": "Redator", "nome": "Bruno" })).unwrap();
+        let segundo =
+            e.usar("recrutar", json!({ "papel": "Redator", "nome": "Bruno" })).unwrap();
+        assert_eq!(primeiro, segundo, "recrutar o mesmo devia devolver o mesmo");
+
+        let quantos = e
+            .banco
+            .lock()
+            .unwrap()
+            .listar_nos(&e.ws)
+            .unwrap()
+            .iter()
+            .filter(|n| n.nome == "Bruno")
+            .count();
+        assert_eq!(quantos, 1, "nasceu um segundo Bruno");
+    }
+
+    #[test]
+    fn nome_ocupado_por_outro_papel_explica_quem_e_em_vez_de_convidar_ao_numero() {
+        // A recusa continua existindo — dizer que a Ana virou Revisora quando
+        // ela é Redatora seria mentir para o modelo, e mentira vira
+        // comportamento estranho três turnos depois. O que muda é a mensagem:
+        // ela diz QUEM já ocupa o nome, para o contorno óbvio não ser "Ana2".
+        let e = elenco();
+        e.usar("recrutar", json!({ "papel": "Redator", "nome": "Ana" })).unwrap();
+        let err = e
+            .usar("recrutar", json!({ "papel": "Revisor", "nome": "Ana" }))
+            .expect_err("papel diferente com nome ocupado não devia passar");
+        let texto = err.to_string();
+        assert!(texto.contains("Redator"), "não disse quem é a Ana: {texto}");
+        assert!(texto.contains("número"), "não desaconselhou o Ana2: {texto}");
+    }
+
     #[test]
     fn concluir_vira_linha_na_conversa() {
         let p = ponte();

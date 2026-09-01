@@ -156,6 +156,7 @@ fn emitir(app: &AppHandle, evento: EventoNucleo) {
         EventoNucleo::AprovacaoDecidida { .. } => "aprovacao:decidida",
         EventoNucleo::NoMensagem { .. } => "no:mensagem",
         EventoNucleo::CadeiaEncerrada { .. } => "cadeia:encerrada",
+        EventoNucleo::CadeiaEsperaPessoa { .. } => "cadeia:espera-pessoa",
         EventoNucleo::CanvasMudou { .. } => "canvas:mudou",
     };
     if let Err(e) = app.emit(nome, &evento) {

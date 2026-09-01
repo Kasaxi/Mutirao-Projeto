@@ -265,6 +265,17 @@ export interface EventoCadeiaEncerrada {
   motivo: string;
 }
 
+/** A cadeia parou numa pergunta, e quem destrava é a pessoa. Não é erro. */
+export interface EventoCadeiaEsperaPessoa {
+  tipo: "cadeia_espera_pessoa";
+  trace_id: string;
+  /** Quem está parado esperando. */
+  node_id: string;
+  /** Quem levantou a mão — é neste nó que a resposta tem de ser dada. */
+  perguntou_node: string;
+  perguntou_nome: string;
+}
+
 // ============================================================ M4: papéis ===
 
 /**

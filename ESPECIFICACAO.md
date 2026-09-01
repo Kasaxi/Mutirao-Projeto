@@ -40,7 +40,7 @@ mutirao/
 │   ├── tests/
 │   │   └── ao_vivo.rs      testes #[ignore] que rodam o Claude Code de verdade
 │   └── src/
-│       ├── lib.rs          fachada + 136 testes
+│       ├── lib.rs          fachada + 139 testes
 │       ├── modelo.rs       tipos de domínio, máquina de estados, preços
 │       ├── agente.rs       trait AgenteAdapter, Roteiro, adaptador falso
 │       ├── claude.rs       adaptador do Claude Code (CLI headless)
@@ -83,7 +83,7 @@ mutirao/
 │       └── Cabos.tsx       SVG dos cabos
 │
 └── testes-ui/
-    ├── fumaca.mjs          65 verificações no Chromium
+    ├── fumaca.mjs          68 verificações no Chromium
     ├── canvas.png          retrato do canvas em repouso
     ├── conversa.png        retrato de um turno inteiro
     ├── aprovacao.png       o card aberto, com o turno parado atrás
@@ -120,7 +120,7 @@ npm run app                 # app de verdade (tauri dev)
 npm run build               # typecheck + build do front
 npm run app:build           # instalador MSI/NSIS
 
-cargo test -p nucleo        # 136 testes do núcleo, offline e de graça
+cargo test -p nucleo        # 139 testes do núcleo, offline e de graça
 node testes-ui/fumaca.mjs   # teste de fumaça da interface
 ```
 
@@ -233,6 +233,8 @@ depender só do nome do evento.
 | `aprovacao:decidida` | `{ tipo, tool_call_id, node_id, decisao, decidido_por }` | alguém (ou uma regra) decidiu | pronto |
 | `no:mensagem` | `{ tipo, de_node, para_node, trace_id, tipo_mensagem }` | mensagem entre nós, para animar o cabo | pronto |
 | `cadeia:encerrada` | `{ tipo, trace_id, node_id, motivo }` | uma cadeia bateu num limite | pronto |
+| `cadeia:espera-pessoa` | `{ tipo, trace_id, node_id, perguntou_node, perguntou_nome }` | quem esperava outro nó ficou parado porque **ele** perguntou a você | pronto |
+| `canvas:mudou` | `{ tipo, workspace_id, motivo }` | o canvas mudou por fora da interface — hoje só quando um agente recruta | pronto |
 
 O campo é `tipo_mensagem`, e não `tipo` como a tabela antiga dizia: `tipo` já é
 o discriminante do envelope, e o serde recusa o homônimo em tempo de
@@ -433,6 +435,36 @@ O teste `dois_nos_esperando_um_pelo_outro_nao_travam_o_app` usa dois adaptadores
 teimosos, que só sabem perguntar. Ele foi verificado ao contrário — com a
 checagem desligada, os dois nós travam e o teste falha.
 
+### O caso vizinho, que não é limite nenhum: a espera que para na pessoa
+
+A é B outra vez, e desta vez B não pergunta de volta a A — **pergunta a você**.
+Nenhum dos quatro limites pega, e é o que se espera deles: aqui nada travou.
+Alguém precisa responder, e no app esse alguém existe.
+
+O que estava errado eram duas outras coisas, e as duas foram medidas ao vivo —
+foi assim que o `um_ciclo_entre_dois_nos_encerra_sozinho` passou a falhar, com
+"Pesquisador em `AguardandoNo`, Redator em `AguardandoHumano`" por dez minutos:
+
+1. **O relógio corria contra o tempo de quem está pensando.** O prazo de dez
+   minutos existe para pegar nó travado, não para cronometrar gente. Uma
+   pergunta feita às onze e respondida ao voltar do almoço matava a cadeia
+   inteira, e todo o trabalho dela ia junto. Hoje `Orquestrador::esperar_resposta`
+   acorda de 250 em 250 ms e **não desconta o tempo** enquanto o destinatário
+   tem pergunta aberta. Não é espera sem fim: `perguntar_humano` tem teto de
+   meia hora, e quando ele estoura o outro lado falha e solta este.
+2. **A tela não dizia nada.** O canvas mostrava dois nós calados — um
+   "pensando", outro "aguardando" — sem ligar um ao outro. Hoje sai um
+   `CadeiaEsperaPessoa` com quem espera e quem perguntou, e o aviso some sozinho
+   quando a pergunta é respondida. Aviso que fica depois de resolvido ensina a
+   ignorar avisos.
+
+O teste offline `quem_espera_nao_morre_no_prazo_enquanto_a_pessoa_pensa` usa um
+prazo de um segundo de propósito, e foi verificado ao contrário: com a pausa
+desligada, ele falha em "a entrega morreu no prazo enquanto a pessoa ainda
+decidia". E o teste ao vivo passou a **fingir ser a pessoa** — sem isso ele
+media um canvas sem ninguém na frente, que não é o produto. Com a correção, a
+cadeia que ficava 420 s pendurada fecha em 31 s, com uma pergunta no meio.
+
 ---
 
 ## 5b. Papéis, times e os tetos de crescimento
@@ -490,6 +522,23 @@ agentes num turno só, porque recrutar não é salto nem gasto de mensagem.
 faz é gastar dinheiro, e para isso servem os tetos. Um card por recruta
 transformaria "monte um time de quatro" em quatro interrupções, e interrupção
 que vira rotina é interrupção que se aprova sem ler.
+
+**E `recrutar` é idempotente.** Recrutar de novo, com o mesmo nome e o mesmo
+papel, alguém que **você** já recrutou devolve a mesma pessoa em vez de um erro.
+A razão é sobre ferramenta, não sobre times: quando uma ferramenta que o modelo
+tende a repetir responde com erro, ele inventa o contorno — e o contorno óbvio
+para "nome ocupado" é acrescentar um número. Um canvas com "Bruno" e "Bruno2"
+não é só feio: `enviar_para` resolve vizinho pelo nome, e depois ninguém sabe
+com qual dos dois está falando.
+
+As duas recusas que sobram dizem **quem** ocupa o nome, e desaconselham o número
+com todas as letras:
+
+- Mesmo nome, papel diferente — devolver o nó seria mentir sobre o papel dele, e
+  mentira para o modelo vira comportamento estranho três turnos depois.
+- Mesmo nome, recrutado por outro — aqui não dá para devolver de jeito nenhum:
+  cabo é escopo (§4), e entregar um vizinho que o recrutador não alcança seria
+  dar acesso que ninguém deu.
 
 ### Partitura é a planta do time, não um backup
 
@@ -685,8 +734,8 @@ Nenhuma palavra de Git aparece. Binário não faz merge: escolhe-se um lado.
 
 | Camada | Como | Cobre |
 |---|---|---|
-| Núcleo | `cargo test -p nucleo` — 136 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras, handshake do MCP, ponte entre nós, fila e os limites, papéis e escada de autonomia, recrutamento com teto, partitura ida e volta, rascunhos em paralelo, publicar com e sem conflito |
-| Interface | `node testes-ui/fumaca.mjs` — 65 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; um turno de ponta a ponta; o card de aprovação com aprovar, negar e "não perguntar de novo"; nota em arquivo e árvore da pasta; o cabo acendendo e o recado chegando ao outro nó com o nome de quem pediu; papel no cabeçalho, time salvo e reaberto com a forma que tinha; a barra de rascunhos e a tela de publicar — que é varrida atrás de palavra de Git |
+| Núcleo | `cargo test -p nucleo` — 139 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras, handshake do MCP, ponte entre nós, fila e os limites, papéis e escada de autonomia, recrutamento com teto, partitura ida e volta, rascunhos em paralelo, publicar com e sem conflito |
+| Interface | `node testes-ui/fumaca.mjs` — 68 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; um turno de ponta a ponta; o card de aprovação com aprovar, negar e "não perguntar de novo"; nota em arquivo e árvore da pasta; o cabo acendendo e o recado chegando ao outro nó com o nome de quem pediu; papel no cabeçalho, time salvo e reaberto com a forma que tinha; a barra de rascunhos e a tela de publicar — que é varrida atrás de palavra de Git |
 | Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` — 15 testes | o Claude Code de verdade: lê, responde, cobra, retoma, reporta erro com a frase certa, grava depois de aprovado, **não** grava quando negado, **não** grava sem barramento — e, com **dois** processos, entrega de um nó a outro e encerra a cadeia sem travar; e um prompt monta um time de quatro, com o papel mudando o que cada agente de fato faz; e dois rascunhos do mesmo trabalho guardando versões diferentes ao mesmo tempo |
 
 **Duas pastas parecidas, de propósito.** `nucleo/testes/` guarda fixtures (nome
@@ -754,6 +803,14 @@ Alguns testes valem por si, porque cobrem coisa que falha calada:
 - `prompt_de_varias_linhas_chega_inteiro` (ao vivo) — a palavra combinada está
   na última linha do prompt. Se ela volta, o prompt atravessou inteiro; é a
   metade que dá para provar fora do Windows.
+- `quem_espera_nao_morre_no_prazo_enquanto_a_pessoa_pensa` — verificado ao
+  contrário: com a pausa do relógio desligada, a entrega morre no prazo de um
+  segundo e o teste falha. Um prazo que corre contra o tempo de quem está
+  pensando mata a cadeia por causa de um café.
+- `recrutar_de_novo_devolve_quem_ja_existe_em_vez_de_um_bruno2` — ferramenta que
+  o modelo repete e que responde com erro faz ele inventar o contorno, e o
+  contorno para "nome ocupado" é acrescentar um número. Dois "Bruno" quebram o
+  `enviar_para`, que resolve vizinho pelo nome.
 
 Um teste que passou merece um comentário no código quando o motivo dele não é
 óbvio. Dois exemplos já no repositório: o `overflow` do nó, que tornava a porta

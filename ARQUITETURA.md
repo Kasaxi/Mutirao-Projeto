@@ -400,6 +400,18 @@ uma vez por máquina, tolerável em três, inviável em trezentas. O painel de c
 opcional: uma chave só, sem teto, é a configuração exata em que um ciclo malcomportado queima
 crédito de verdade.
 
+**Dois achados do M5 que só a suíte ao vivo revelou, e que não eram do Windows.**
+O primeiro é um quinto caso de espera que nenhum dos quatro limites pega, porque
+não é travamento: A espera B, e B pergunta **a você**. O prazo de dez minutos
+existe para pegar nó travado, não para cronometrar gente — corrido contra o
+tempo de quem está pensando, ele matava a cadeia inteira por causa de um café.
+Hoje o relógio para enquanto há pergunta aberta, e a tela diz quem depende de
+quem em vez de mostrar dois nós calados. A cadeia que ficava 420 s pendurada
+fecha em 31 s. O segundo: `recrutar` virou idempotente, porque ferramenta que o
+modelo repete e que responde com erro faz ele inventar o contorno — e o contorno
+para "nome ocupado" é um "Bruno2" no canvas, que quebra o `enviar_para`. Os dois
+estão detalhados no `ESPECIFICACAO.md §5` e `§5b`.
+
 **Adiantado do M6, antes do primeiro teste numa máquina Windows:** dois defeitos que só existem
 lá e que teriam aparecido no primeiro minuto de uso. O `claude` instalado pelo npm é um
 `claude.cmd`, e o `CreateProcess` do Windows só acrescenta `.exe` ao procurar no PATH — o app

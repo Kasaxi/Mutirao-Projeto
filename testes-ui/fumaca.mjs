@@ -276,8 +276,33 @@ conferir(
   (await pagina.locator('.cabo[data-falando="pedido"]').count()) === 1,
 );
 
-// Retrato do marco: a ponte no ato de atravessar.
+// A cadeia parou numa pergunta, e quem destrava é a pessoa. Sem este aviso o
+// canvas mostra dois nós calados — um "pensando", outro "aguardando" — e
+// ninguém liga um ao outro. Medido ao vivo antes de existir: a cadeia ficava
+// dez minutos assim e morria no prazo.
+await pagina.waitForSelector(".espera-pessoa", { timeout: 5000 });
+const espera = await pagina.locator(".espera-pessoa").first().innerText();
+conferir(
+  "quando a cadeia para numa pergunta, o aviso diz quem espera quem",
+  espera.includes("Pesquisador") && espera.includes("Redator"),
+  espera.replace(/\n/g, " ").slice(0, 70),
+);
+conferir(
+  "e oferece um caminho até quem levantou a mão",
+  (await pagina.locator(".espera-pessoa .espera-ver").count()) === 1,
+);
+
+// Retrato do marco: a ponte no ato de atravessar, com o aviso de quem
+// depende de quem — que é a novidade que ele precisa mostrar.
 await pagina.screenshot({ path: "testes-ui/ponte.png" });
+
+// Respondida a pergunta, o aviso some sozinho. Aviso que fica depois de
+// resolvido é pior que aviso nenhum: ensina a ignorar.
+await pagina.waitForFunction(
+  () => document.querySelectorAll(".espera-pessoa").length === 0,
+  { timeout: 6000 },
+);
+conferir("e some quando a pergunta é respondida", true);
 
 // O recado chega ao outro nó com o nome de quem pediu — e chega sozinho, sem
 // ninguém reabrir o nó.

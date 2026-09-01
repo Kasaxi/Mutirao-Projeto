@@ -526,6 +526,21 @@ pub enum EventoNucleo {
         node_id: String,
         motivo: String,
     },
+    /// A cadeia parou, e quem pode destravá-la é **a pessoa**.
+    ///
+    /// Acontece quando A está esperando B e B levanta a mão para perguntar
+    /// alguma coisa. Nenhum dos limites pega isso, e nem deveria: não é
+    /// travamento, é uma pergunta aberta. Mas sem este aviso o canvas mostra
+    /// dois nós calados — um "pensando", outro "aguardando" — e a pessoa não
+    /// tem como saber que a fila inteira depende de um clique dela.
+    CadeiaEsperaPessoa {
+        trace_id: String,
+        /// Quem está parado esperando.
+        node_id: String,
+        /// Quem levantou a mão. É neste nó que a resposta tem de ser dada.
+        perguntou_node: String,
+        perguntou_nome: String,
+    },
     /// O canvas mudou por fora da interface — hoje só quando um agente recruta
     /// outro. O front relê o workspace ao ver isto.
     ///

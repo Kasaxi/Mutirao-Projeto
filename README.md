@@ -20,6 +20,11 @@ rodando ao mesmo tempo, e publicar uma delas sem você ver uma linha de Git (M5)
 > de um nó que nunca existiu, para tentativa nenhuma virar sonda do seu canvas.
 > Quando dois nós conversam, o cabo acende: a ponte é visível, não mágica.
 
+> **Nada fica parado sem dizer por quê.** Se um agente está esperando outro, e
+> esse outro fez uma pergunta a você, a tela diz isso e mostra onde responder —
+> em vez de dois nós calados. E o relógio para enquanto a pergunta está aberta:
+> a cadeia não morre porque você foi almoçar.
+
 > **Nada é gravado sem o seu clique.** Antes de escrever qualquer arquivo ou
 > rodar qualquer comando, o agente para num card que mostra o quê e quanto —
 > e fica parado até você decidir. Não é gravar e desfazer: não chega a gravar.
@@ -45,8 +50,8 @@ MUTIRAO_CLAUDE_BIN=...  npm run app   # CLI fora do PATH (comum no Windows)
 Testes:
 
 ```bash
-cargo test -p nucleo        # 136 testes, offline e de graça
-node testes-ui/fumaca.mjs   # 65 verificações da interface no Chromium
+cargo test -p nucleo        # 139 testes, offline e de graça
+node testes-ui/fumaca.mjs   # 68 verificações da interface no Chromium
 
 # Estes gastam token e precisam da CLI instalada. Rode ao subir de versão dela.
 # Os do M3 ao M5 sobem VÁRIOS Claude Code, falando entre si e em rascunhos.
@@ -72,7 +77,7 @@ janela, IPC e a tradução de evento do núcleo em evento de janela. O front
 
 Essa separação existe por um motivo prático: `cargo test -p nucleo` roda em
 qualquer máquina, sem as dependências de sistema do Tauri — e é onde estão os
-136 testes, inclusive os de turno completo, os da ponte, os do time e os de rascunho.
+139 testes, inclusive os de turno completo, os da ponte, os do time e os de rascunho.
 
 O adaptador falso (`nucleo/src/agente.rs`) não é conveniência de teste: testar
 orquestração contra a API de verdade é lento, caro e não-determinístico. Ele lê
