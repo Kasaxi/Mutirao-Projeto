@@ -1,0 +1,16 @@
+# Fim de linha decidido aqui, e não pela configuração de quem clona.
+#
+# O instalador do Git for Windows liga `core.autocrlf` por padrão, então a
+# mesma árvore chega com CRLF numa máquina e LF na outra — e o que quebra com
+# isso não quebra igual nos dois lugares. Fixar aqui tira a classe inteira de
+# "funciona na minha máquina" antes de ela existir.
+* text=auto eol=lf
+
+# PowerShell é a exceção: CRLF é o costume da plataforma dele, e o arquivo só
+# roda lá.
+*.ps1 text eol=crlf
+
+# Binário não se converte.
+*.png binary
+*.ico binary
+*.icns binary

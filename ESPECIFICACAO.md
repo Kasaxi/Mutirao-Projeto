@@ -20,6 +20,7 @@ portal de navegador do M5 e o M6 ainda são contrato, não código.
 mutirao/
 ├── ARQUITETURA.md          decisões e marcos (o porquê)
 ├── ESPECIFICACAO.md        este arquivo (o como)
+├── verificar-windows.ps1   o que falta numa máquina nova, antes do primeiro build
 ├── Cargo.toml              workspace Rust: nucleo + src-tauri
 ├── package.json            front e scripts
 ├── vite.config.ts
@@ -110,10 +111,22 @@ Linux, sem as dependências de sistema do Tauri.
 | Visual Studio Build Tools + Windows SDK | linkagem do Tauri |
 | WebView2 Runtime | já vem no Windows 11 |
 | Git for Windows | **os rascunhos do M5 precisam dele**; sem ele o app roda sem rascunho e diz isso na barra. Também é o que a ferramenta Bash do Claude Code usa |
+| Claude Code CLI | sem ela o app roda no adaptador falso e diz isso na barra |
+
+`verificar-windows.ps1` confere a lista inteira e diz o que falta. Vale rodar
+antes do primeiro `npm install`: as Build Tools são o único item que só reclama
+**no fim** de uma compilação inteira, que é a pior hora para descobrir. Ele não
+instala nada — é a versão em linha de comando do que o onboarding do M6 vai
+fazer na tela.
 
 ### Comandos
 
-```bash
+**PowerShell, não bash.** O app só roda no Windows, e `VAR=valor comando` é
+sintaxe de shell Unix: no PowerShell isso não define variável nenhuma, e o
+comando roda como se você não tivesse pedido nada. Some calado, que é o pior
+jeito de uma opção falhar.
+
+```powershell
 npm install                 # dependências do front
 npm run dev                 # front sozinho, no navegador, com núcleo falso
 npm run app                 # app de verdade (tauri dev)
@@ -122,6 +135,9 @@ npm run app:build           # instalador MSI/NSIS
 
 cargo test -p nucleo        # 139 testes do núcleo, offline e de graça
 node testes-ui/fumaca.mjs   # teste de fumaça da interface
+
+$env:MUTIRAO_ADAPTADOR="falso"; npm run app    # roteiro no lugar do modelo
+Remove-Item Env:MUTIRAO_ADAPTADOR              # volta ao agente de verdade
 ```
 
 O teste de fumaça usa o Chromium que vem com o Playwright. Em máquina onde ele

@@ -38,13 +38,23 @@ barra de cima**, nunca em silêncio. A CLI é procurada no PATH como o console
 procuraria, então o `claude.cmd` que o npm instala no Windows é encontrado;
 `MUTIRAO_CLAUDE_BIN` continua mandando quando você quer apontar outra.
 
-```bash
+Antes do primeiro `npm install` numa máquina nova, `verificar-windows.ps1` diz
+o que falta e onde pegar — inclusive as Build Tools, que só reclamam no fim de
+uma compilação inteira:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File verificar-windows.ps1
+```
+
+```powershell
 npm install
 npm run dev      # front no navegador, com núcleo falso (nada é gravado)
 npm run app      # app de verdade
 
-MUTIRAO_ADAPTADOR=falso npm run app   # força o roteiro: mexer na interface sem gastar
-MUTIRAO_CLAUDE_BIN=...  npm run app   # CLI fora do PATH (comum no Windows)
+# variável de ambiente no PowerShell é `$env:`, e a bash não vale aqui.
+$env:MUTIRAO_ADAPTADOR="falso"; npm run app   # força o roteiro: mexer na interface sem gastar
+$env:MUTIRAO_CLAUDE_BIN="C:\...\claude.cmd"   # apontar outra CLI, se você tiver duas
+Remove-Item Env:MUTIRAO_ADAPTADOR             # volta ao agente de verdade
 ```
 
 Testes:
