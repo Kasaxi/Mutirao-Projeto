@@ -41,7 +41,7 @@ mutirao/
 │   ├── tests/
 │   │   └── ao_vivo.rs      testes #[ignore] que rodam o Claude Code de verdade
 │   └── src/
-│       ├── lib.rs          fachada + 139 testes
+│       ├── lib.rs          fachada + 140 testes
 │       ├── modelo.rs       tipos de domínio, máquina de estados, preços
 │       ├── agente.rs       trait AgenteAdapter, Roteiro, adaptador falso
 │       ├── claude.rs       adaptador do Claude Code (CLI headless)
@@ -133,7 +133,7 @@ npm run app                 # app de verdade (tauri dev)
 npm run build               # typecheck + build do front
 npm run app:build           # instalador MSI/NSIS
 
-cargo test -p nucleo        # 139 testes do núcleo, offline e de graça
+cargo test -p nucleo        # 140 testes do núcleo, offline e de graça
 node testes-ui/fumaca.mjs   # teste de fumaça da interface
 
 $env:MUTIRAO_ADAPTADOR="falso"; npm run app    # roteiro no lugar do modelo
@@ -613,6 +613,27 @@ abre, e nunca mais muda de ideia; ninguém avisa o processo de nada. Os
 processos morrem, as sessões ficam gravadas e o próximo turno as retoma — o
 usuário perde o processo, não a conversa.
 
+### O repositório oculto não herda a configuração da máquina
+
+`RAMO_PRINCIPAL` fixo já era isso; a lista cresceu quando o CI no Windows
+rodou pela primeira vez. Além de `core.bare` e `core.fileMode`, `git::ajustar`
+crava que **nada ali é texto que se converta**:
+
+- `core.autocrlf = false`, e
+- `* -text` em `$GIT_DIR/info/attributes`, que tem a precedência mais alta de
+  todas — acima até de um `.gitattributes` que por acaso esteja na pasta do
+  usuário.
+
+O motivo é concreto e foi medido: o instalador do Git for Windows liga
+`core.autocrlf` por padrão, e com ele publicar um rascunho devolvia
+`"prazo de 18 meses\r\n"` onde o arquivo tinha `"\n"`. O app estaria
+reescrevendo **todas as linhas** de um documento que ninguém mandou mudar, e
+"publicar leva só o que mudou" viraria mentira na primeira publicação.
+
+`preparar` reafirma esses ajustes mesmo num repositório que já existe. Sem
+isso, quem criou o workspace numa versão anterior do app nunca receberia a
+correção.
+
 ### Três coisas medidas sobre o git
 
 1. **`git add -A`, nunca `-u`.** `-u` só pega arquivo já rastreado, e criar
@@ -750,7 +771,7 @@ Nenhuma palavra de Git aparece. Binário não faz merge: escolhe-se um lado.
 
 | Camada | Como | Cobre |
 |---|---|---|
-| Núcleo | `cargo test -p nucleo` — 139 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras, handshake do MCP, ponte entre nós, fila e os limites, papéis e escada de autonomia, recrutamento com teto, partitura ida e volta, rascunhos em paralelo, publicar com e sem conflito |
+| Núcleo | `cargo test -p nucleo` — 140 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras, handshake do MCP, ponte entre nós, fila e os limites, papéis e escada de autonomia, recrutamento com teto, partitura ida e volta, rascunhos em paralelo, publicar com e sem conflito |
 | Interface | `node testes-ui/fumaca.mjs` — 68 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; um turno de ponta a ponta; o card de aprovação com aprovar, negar e "não perguntar de novo"; nota em arquivo e árvore da pasta; o cabo acendendo e o recado chegando ao outro nó com o nome de quem pediu; papel no cabeçalho, time salvo e reaberto com a forma que tinha; a barra de rascunhos e a tela de publicar — que é varrida atrás de palavra de Git |
 | Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` — 15 testes | o Claude Code de verdade: lê, responde, cobra, retoma, reporta erro com a frase certa, grava depois de aprovado, **não** grava quando negado, **não** grava sem barramento — e, com **dois** processos, entrega de um nó a outro e encerra a cadeia sem travar; e um prompt monta um time de quatro, com o papel mudando o que cada agente de fato faz; e dois rascunhos do mesmo trabalho guardando versões diferentes ao mesmo tempo |
 
@@ -827,6 +848,10 @@ Alguns testes valem por si, porque cobrem coisa que falha calada:
   o modelo repete e que responde com erro faz ele inventar o contorno, e o
   contorno para "nome ocupado" é acrescentar um número. Dois "Bruno" quebram o
   `enviar_para`, que resolve vizinho pelo nome.
+- `publicar_nao_troca_a_quebra_de_linha_do_arquivo_da_pessoa` — quem pegou o
+  defeito foi o CI no Windows, não este teste; ele existe para o defeito não
+  voltar. Liga `core.autocrlf` na marra para reproduzir no Linux o que lá vem
+  ligado de fábrica, e falha em `"primeira linha\r\n"` sem a correção.
 
 Um teste que passou merece um comentário no código quando o motivo dele não é
 óbvio. Dois exemplos já no repositório: o `overflow` do nó, que tornava a porta

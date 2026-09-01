@@ -136,11 +136,13 @@ pub const RAMO_PRINCIPAL: &str = "principal";
 
 /// Prepara o repositório de um workspace e grava o estado atual da pasta.
 ///
-/// Idempotente: chamar de novo num repositório que já existe não faz nada.
-/// É o que permite chamar isto na abertura do workspace sem checar antes.
+/// Idempotente: num repositório que já existe, só reafirma a configuração e
+/// volta. É o que permite chamar isto na abertura do workspace sem checar
+/// antes — e reafirmar importa, porque um repositório criado por uma versão
+/// anterior do app não tem os ajustes que vieram depois.
 pub fn preparar(git_dir: &Path, pasta: &Path) -> Resultado<()> {
     if git_dir.join("HEAD").exists() {
-        return Ok(());
+        return ajustar(git_dir, pasta);
     }
     if let Some(pai) = git_dir.parent() {
         std::fs::create_dir_all(pai)?;
@@ -159,6 +161,17 @@ pub fn preparar(git_dir: &Path, pasta: &Path) -> Resultado<()> {
         )));
     }
 
+    ajustar(git_dir, pasta)?;
+    gravar_estado(git_dir, pasta, "o trabalho como estava")?;
+    Ok(())
+}
+
+/// A configuração do repositório oculto, que **não** herda a da máquina.
+///
+/// Mesmo raciocínio do `RAMO_PRINCIPAL`: o repositório é nosso, e depender da
+/// configuração de quem instalou faz o mesmo app se comportar diferente em
+/// cada computador.
+fn ajustar(git_dir: &Path, pasta: &Path) -> Resultado<()> {
     // `--bare` cria o repositório sem árvore; desligamos isso para ele aceitar
     // `--work-tree` apontando para a pasta do usuário.
     git(git_dir, pasta, &["config", "core.bare", "false"])?;
@@ -167,7 +180,25 @@ pub fn preparar(git_dir: &Path, pasta: &Path) -> Resultado<()> {
     // permissões de arquivo vindas do Windows.
     git(git_dir, pasta, &["config", "core.fileMode", "false"])?;
 
-    gravar_estado(git_dir, pasta, "o trabalho como estava")?;
+    // NUNCA traduzir quebra de linha. Medido no Windows, e quem pegou foi o
+    // CI: o instalador do Git for Windows liga `core.autocrlf` por padrão, e
+    // com isso publicar um rascunho devolvia `"prazo de 18 meses\r\n"` onde o
+    // arquivo do usuário tinha `"\n"`.
+    //
+    // Não é detalhe de teste. É o app reescrevendo **todas as linhas** de um
+    // documento que a pessoa não mandou mudar: qualquer ferramenta que compare
+    // versões passa a ver o arquivo inteiro alterado, e "publicar leva só o
+    // que mudou" vira mentira já na primeira publicação.
+    //
+    // São duas travas, e a segunda é a que manda.
+    git(git_dir, pasta, &["config", "core.autocrlf", "false"])?;
+    // `$GIT_DIR/info/attributes` tem a precedência MAIS ALTA de todas — acima
+    // até de um `.gitattributes` que por acaso esteja na pasta do usuário.
+    // `* -text` diz "nada aqui é texto que se converta", e é a única forma de
+    // a garantia não depender nem da máquina nem do conteúdo da pasta.
+    let info = git_dir.join("info");
+    std::fs::create_dir_all(&info)?;
+    std::fs::write(info.join("attributes"), "* -text\n")?;
     Ok(())
 }
 

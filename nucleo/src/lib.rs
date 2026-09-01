@@ -2981,6 +2981,12 @@ mod testes {
         fn banco(&self) -> std::sync::MutexGuard<'_, Banco> {
             self.banco.lock().unwrap()
         }
+
+        /// O diretório do repositório oculto. Só os testes que mexem na
+        /// configuração dele precisam disto.
+        fn repo(&self) -> std::path::PathBuf {
+            self._repo.0.join("historico")
+        }
     }
 
     macro_rules! obra_ou_pula {
@@ -3096,6 +3102,41 @@ mod testes {
         assert_eq!(o.banco().obter_ensaio(&e.id).unwrap().estado, EstadoEnsaio::Publicado);
         // A pasta continua limpa depois de publicar.
         assert!(!o.pasta.0.join(".git").exists());
+    }
+
+    #[test]
+    fn publicar_nao_troca_a_quebra_de_linha_do_arquivo_da_pessoa() {
+        // Quem pegou isto foi o CI no Windows, e não este teste: os quatro
+        // testes de rascunho falharam lá com `"prazo de 18 meses\r\n"` onde a
+        // pasta tinha `"\n"`. O instalador do Git for Windows liga
+        // `core.autocrlf` por padrão, e com ele o merge da publicação
+        // reescreve TODAS as linhas de um documento que ninguém mandou mudar —
+        // qualquer ferramenta que compare versões passa a ver o arquivo
+        // inteiro alterado.
+        //
+        // Aqui a máquina é Linux, então o teste **liga na marra** o que lá vem
+        // ligado de fábrica. É o mesmo defeito, reproduzido de propósito.
+        let o = obra_ou_pula!();
+        let saida = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(o.repo())
+            .args(["config", "core.autocrlf", "true"])
+            .output()
+            .unwrap();
+        assert!(saida.status.success(), "não consegui simular o Windows");
+
+        let e = ensaios::criar(&o.banco(), &o.ws, "Rascunho").unwrap();
+        let worktree = std::path::Path::new(&e.caminho_worktree);
+        std::fs::write(worktree.join("contrato.txt"), "primeira linha\nsegunda linha\n").unwrap();
+
+        ensaios::publicar(&o.banco(), &o.orq, &e.id, &[]).unwrap();
+
+        let publicado = std::fs::read_to_string(o.pasta.0.join("contrato.txt")).unwrap();
+        assert!(
+            !publicado.contains('\r'),
+            "o app trocou a quebra de linha do arquivo da pessoa: {publicado:?}"
+        );
+        assert_eq!(publicado, "primeira linha\nsegunda linha\n");
     }
 
     #[test]

@@ -60,7 +60,7 @@ Remove-Item Env:MUTIRAO_ADAPTADOR             # volta ao agente de verdade
 Testes:
 
 ```bash
-cargo test -p nucleo        # 139 testes, offline e de graça
+cargo test -p nucleo        # 140 testes, offline e de graça
 node testes-ui/fumaca.mjs   # 68 verificações da interface no Chromium
 
 # Estes gastam token e precisam da CLI instalada. Rode ao subir de versão dela.
@@ -87,7 +87,7 @@ janela, IPC e a tradução de evento do núcleo em evento de janela. O front
 
 Essa separação existe por um motivo prático: `cargo test -p nucleo` roda em
 qualquer máquina, sem as dependências de sistema do Tauri — e é onde estão os
-139 testes, inclusive os de turno completo, os da ponte, os do time e os de rascunho.
+140 testes, inclusive os de turno completo, os da ponte, os do time e os de rascunho.
 
 O adaptador falso (`nucleo/src/agente.rs`) não é conveniência de teste: testar
 orquestração contra a API de verdade é lento, caro e não-determinístico. Ele lê
