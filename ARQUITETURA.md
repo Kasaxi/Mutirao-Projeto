@@ -400,6 +400,15 @@ uma vez por máquina, tolerável em três, inviável em trezentas. O painel de c
 opcional: uma chave só, sem teto, é a configuração exata em que um ciclo malcomportado queima
 crédito de verdade.
 
+**Adiantado do M6, antes do primeiro teste numa máquina Windows:** dois defeitos que só existem
+lá e que teriam aparecido no primeiro minuto de uso. O `claude` instalado pelo npm é um
+`claude.cmd`, e o `CreateProcess` do Windows só acrescenta `.exe` ao procurar no PATH — o app
+diria "não encontrei o Claude Code" com a CLI funcionando no terminal ao lado. E um app GUI que
+abre programa de console ganha uma janela preta por processo, o que num time de quatro agentes
+é um estrobo. Os dois estão em `nucleo/src/processo.rs`, com o que foi medido e o que não foi
+dito em voz alta — ver `ESPECIFICACAO.md §9`. Isto é metade do "onboarding que detecta" do M6:
+detectar direito antes de ensinar a instalar.
+
 **Total: 14 a 15 semanas** até algo instalável. M0–M3 (8 semanas) já é ferramenta de uso diário —
 ponto certo para parar e usar de verdade antes de investir o resto.
 

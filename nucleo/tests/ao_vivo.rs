@@ -150,6 +150,50 @@ fn turno_de_verdade_le_arquivo_responde_e_cobra() {
     assert!(acoes.iter().any(|a| a.ferramenta == "Read"), "esperava uma leitura");
 }
 
+/// Prompt de duas linhas — o conserto do Windows, na metade que dá para medir
+/// daqui.
+///
+/// Desde este marco o prompt viaja pelo **stdin**, e não como argumento. A
+/// razão é do Windows: instalada pelo npm, a CLI é um `claude.cmd`, e programa
+/// em lote não aceita argumento com quebra de linha — o Rust recusa a chamada
+/// antes de abrir o processo. Prompt de duas linhas é o caso comum, não o raro,
+/// então o app quebraria no uso normal.
+///
+/// O que este teste prova: o prompt multilinha atravessa o cano inteiro e o
+/// turno responde. O que ele não prova: que o `.cmd` roda — isso só o Windows
+/// diz, e é por isso que o `processo.rs` diz em voz alta o que não mediu.
+#[test]
+#[ignore = "gasta token e precisa do Claude Code instalado"]
+fn prompt_de_varias_linhas_chega_inteiro() {
+    let b = bancada();
+    b.orq
+        .enviar(
+            &b.sessao_id,
+            "Vou te dar duas instruções, uma por linha.\n\
+             Primeira: não leia arquivo nenhum.\n\
+             Segunda: responda com a palavra ABACAXI e mais nada.",
+        )
+        .unwrap();
+    assert!(b.esperar_ocioso(Duration::from_secs(240)), "estado ficou em {:?}", b.estado());
+
+    let banco = b.banco.lock().unwrap();
+    let hist = banco.historico(&b.sessao_id, 50).unwrap();
+    let resposta = hist
+        .iter()
+        .rev()
+        .find(|m| m.papel == PapelMensagem::Agente)
+        .expect("nenhuma resposta do agente");
+    println!("resposta: {}", resposta.conteudo);
+
+    // A palavra está na ÚLTIMA linha do prompt. Se ela voltou, o prompt chegou
+    // inteiro — que é a coisa toda que este teste existe para dizer.
+    assert!(
+        resposta.conteudo.to_uppercase().contains("ABACAXI"),
+        "a última linha do prompt não chegou: {}",
+        resposta.conteudo
+    );
+}
+
 #[test]
 #[ignore = "gasta token e precisa do Claude Code instalado"]
 fn segundo_turno_retoma_a_conversa_em_vez_de_comecar_outra() {

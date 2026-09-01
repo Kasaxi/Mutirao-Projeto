@@ -33,10 +33,18 @@
 //! O custo: mover a pasta do workspace desliga o histórico. Já era assim — o
 //! caminho absoluto está gravado em `workspace.pasta` desde o M0 — então isto
 //! não piora nada que já não estivesse quebrado.
+//!
+//! ## Todo git sai por `processo::novo`
+//!
+//! Nenhum `Command::new` direto aqui. Publicar dispara vários gits em sequência
+//! e, num app GUI do Windows, cada um deles pisca uma janela de console preta —
+//! o usuário veria a tela de publicar respondendo com um estrobo. O porquê
+//! está em `processo.rs`.
 
 use crate::erro::{Erro, Resultado};
+use crate::processo;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Identidade dos commits que o app faz sozinho.
 ///
@@ -61,7 +69,7 @@ const AUTOR: &[&str] = &[
 /// servindo — canvas, agentes, aprovação, times — e só o trabalho paralelo
 /// fica de fora, dito em voz alta.
 pub fn existe() -> bool {
-    Command::new("git")
+    processo::novo("git")
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -78,7 +86,7 @@ pub fn existe() -> bool {
 /// contém a pasta do usuário. Achar o repositório errado e commitar nele é uma
 /// falha que só aparece na máquina de outra pessoa.
 fn git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Resultado<String> {
-    let saida = Command::new("git")
+    let saida = processo::novo("git")
         .arg("--git-dir")
         .arg(git_dir)
         .arg("--work-tree")
@@ -103,7 +111,7 @@ fn git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Resultado<String> {
 /// `worktree add` tem um `.git` que aponta para o repositório principal, então
 /// aqui o git se acha sozinho.
 fn git_em(pasta: &Path, args: &[&str]) -> Resultado<String> {
-    let saida = Command::new("git")
+    let saida = processo::novo("git")
         .arg("-C")
         .arg(pasta)
         .args(AUTOR)
@@ -138,7 +146,7 @@ pub fn preparar(git_dir: &Path, pasta: &Path) -> Resultado<()> {
         std::fs::create_dir_all(pai)?;
     }
 
-    let saida = Command::new("git")
+    let saida = processo::novo("git")
         .args(["init", "--bare", "--quiet", "--initial-branch", RAMO_PRINCIPAL])
         .arg(git_dir)
         .stdin(Stdio::null())
@@ -264,7 +272,7 @@ pub fn prever_merge(git_dir: &Path, pasta: &Path, ramo: &str) -> Resultado<Previ
 
     // Este é o único lugar em que a falha do git **não** é erro: código 1 quer
     // dizer "conflitaria", que é resposta legítima e o que a tela precisa.
-    let saida = Command::new("git")
+    let saida = processo::novo("git")
         .arg("--git-dir")
         .arg(git_dir)
         .arg("--work-tree")
@@ -318,7 +326,7 @@ pub fn publicar(
     ramo: &str,
     escolhas: &[(String, Lado)],
 ) -> Resultado<()> {
-    let saida = Command::new("git")
+    let saida = processo::novo("git")
         .arg("--git-dir")
         .arg(git_dir)
         .arg("--work-tree")

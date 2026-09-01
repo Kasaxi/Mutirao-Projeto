@@ -30,6 +30,7 @@
 use crate::agente::{AgenteAdapter, ContextoSessao, Fabrica};
 use crate::erro::{Erro, Resultado};
 use crate::modelo::*;
+use crate::processo;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -341,10 +342,18 @@ impl AdaptadorClaude {
     /// A linha de comando do turno. `pub(crate)` só para o teste poder olhar
     /// se o token vazou para dentro dela — ver
     /// `o_token_da_sessao_nao_aparece_na_linha_de_comando`.
-    pub(crate) fn comando(&self, texto: &str) -> Command {
-        let mut cmd = Command::new(&self.binario);
+    ///
+    /// **O prompt não está aqui.** Ele vai pelo stdin, em [`turno`], e a razão
+    /// é o Windows: instalada pelo npm, a CLI é um `claude.cmd`, e programa em
+    /// lote não aceita argumento com quebra de linha — o Rust recusa antes
+    /// mesmo de abrir o processo. Um prompt de duas linhas, que é o normal,
+    /// falharia sempre. E a linha de comando do Windows para em 32 mil
+    /// caracteres: colar um documento no prompt estouraria o teto.
+    ///
+    /// [`turno`]: AdaptadorClaude::turno
+    pub(crate) fn comando(&self) -> Command {
+        let mut cmd = processo::novo(&self.binario);
         cmd.arg("--print")
-            .arg(texto)
             .arg("--output-format")
             .arg("stream-json")
             // Sem isto a resposta só chega inteira no fim, e a face conversa
@@ -370,9 +379,12 @@ impl AdaptadorClaude {
             .arg("--strict-mcp-config")
             // A pasta do workspace é o mundo do agente.
             .current_dir(&self.ctx.pasta)
-            // stdin fechado: sem isto a CLI espera 3 segundos por dados que
-            // nunca vêm, em todo turno. Medido, não suposto.
-            .stdin(Stdio::null())
+            // O cano do prompt. Antes isto era `Stdio::null()`, porque sem
+            // fechar o stdin a CLI espera 3 segundos por dados que nunca vêm,
+            // em todo turno — medido. A espera continua não existindo: o
+            // prompt entra e o cano fecha em seguida, então o EOF chega na
+            // hora, em vez de nunca.
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -562,7 +574,7 @@ impl AdaptadorClaude {
     /// primeiro turno, para o erro ser "instale o Claude Code" em vez de
     /// "programa não encontrado".
     pub fn detectar(binario: &str) -> Resultado<String> {
-        let saida = Command::new(binario)
+        let saida = processo::novo(binario)
             .arg("--version")
             .stdin(Stdio::null())
             .output()
@@ -586,7 +598,7 @@ impl AgenteAdapter for AdaptadorClaude {
     fn turno(&mut self, texto: &str) -> Resultado<Receiver<EventoAgente>> {
         self.cancelado.store(false, Ordering::SeqCst);
 
-        let mut filho = self.comando(texto).spawn().map_err(|e| {
+        let mut filho = self.comando().spawn().map_err(|e| {
             Erro::invalido(format!(
                 "não consegui rodar o Claude Code (`{}`): {e}",
                 self.binario
@@ -595,6 +607,25 @@ impl AgenteAdapter for AdaptadorClaude {
 
         let stdout = filho.stdout.take().ok_or_else(|| Erro::invalido("sem stdout"))?;
         let stderr = filho.stderr.take().ok_or_else(|| Erro::invalido("sem stderr"))?;
+        let mut entrada = filho.stdin.take().ok_or_else(|| Erro::invalido("sem stdin"))?;
+
+        // O prompt vai numa thread própria, e não aqui, pelo mesmo motivo do
+        // coletor de stderr logo abaixo: o cano tem fundo. Um prompt maior que
+        // o buffer do sistema — um documento colado, por exemplo — bloquearia
+        // a escrita até alguém ler do outro lado, e quem lê é a CLI, que só
+        // começa depois de nós voltarmos. O turno travaria antes de nascer.
+        //
+        // Fechar o cano no fim não é detalhe: é o EOF que diz à CLI que o
+        // prompt acabou. Sem ele, ela espera para sempre.
+        {
+            let texto = texto.to_string();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = entrada.write_all(texto.as_bytes());
+                let _ = entrada.flush();
+                drop(entrada);
+            });
+        }
         *self.filho.lock().map_err(|_| Erro::invalido("processo travado"))? = Some(filho);
 
         let (tx, rx) = mpsc::channel();
@@ -743,10 +774,22 @@ pub struct FabricaClaude {
 }
 
 impl FabricaClaude {
-    /// `MUTIRAO_CLAUDE_BIN` cobre o caso de a CLI não estar no PATH — comum no
-    /// Windows, onde ela costuma virar um `.cmd` numa pasta do npm.
+    /// Onde está a CLI.
+    ///
+    /// `MUTIRAO_CLAUDE_BIN` continua mandando quando existe — é a saída para
+    /// quem tem duas instalações, ou uma fora do PATH. Sem ela, `processo::achar`
+    /// procura `claude` do jeito que o console procuraria, e é isso que faz o
+    /// `claude.cmd` do npm ser encontrado no Windows. Antes disto, quem
+    /// instalasse pelo npm via "não encontrei o Claude Code" com a CLI
+    /// funcionando no terminal ao lado.
+    ///
+    /// Não achar não é erro aqui: guardamos o nome pedido e deixamos o erro
+    /// sair de `detectar`, que é quem tem a frase certa para o usuário.
     pub fn nova() -> Self {
-        let binario = std::env::var("MUTIRAO_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+        let pedido = std::env::var("MUTIRAO_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+        let binario = processo::achar(&pedido)
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or(pedido);
         FabricaClaude { binario }
     }
 

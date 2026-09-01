@@ -21,6 +21,7 @@ pub mod modelo;
 pub mod orquestrador;
 pub mod papeis;
 pub mod partituras;
+pub mod processo;
 
 pub use agente::{AdaptadorFalso, AgenteAdapter, ContextoSessao, Fabrica, FabricaFalsa, Roteiro};
 pub use arquivos::ItemArquivo;
@@ -2150,10 +2151,42 @@ mod testes {
 
         let a = AdaptadorClaude::novo("claude", ctx).unwrap();
         assert!(a.pode_escrever());
-        let linha = format!("{:?}", a.comando("oi"));
+        let linha = format!("{:?}", a.comando());
         assert!(!linha.contains("segredo-que-nao-pode-vazar"), "o token vazou: {linha}");
         assert!(linha.contains("--mcp-config"), "sem ponte: {linha}");
         assert!(linha.contains("mcp__mutirao__enviar_para"), "a ponte não foi nomeada: {linha}");
+    }
+
+    /// O prompt não é argumento de linha de comando, e isso é conserto de
+    /// Windows: instalada pelo npm, a CLI é um `claude.cmd`, e programa em lote
+    /// não aceita argumento com quebra de linha — o Rust recusa a chamada antes
+    /// de abrir o processo. Um prompt de duas linhas é o caso comum, não o
+    /// raro. Some-se o teto de 32 mil caracteres da linha de comando do
+    /// Windows, que um documento colado estoura.
+    #[test]
+    fn o_prompt_nao_entra_na_linha_de_comando() {
+        let ctx = ContextoSessao {
+            session_id: "ses_teste".into(),
+            node_id: "no_teste".into(),
+            pasta: std::env::temp_dir().to_string_lossy().to_string(),
+            sessao_externa_id: None,
+            token: "t".into(),
+            url_barramento: None,
+            papel: None,
+        };
+        let a = AdaptadorClaude::novo("claude", ctx).unwrap();
+        let linha = format!("{:?}", a.comando());
+
+        // `--print` continua lá, sozinho: é ele que põe a CLI em modo
+        // headless. Sem prompt depois dele, ela lê o prompt do stdin —
+        // medido na 2.1.252, inclusive com prompt de duas linhas.
+        let partes: Vec<&str> = linha.split("\"--print\"").collect();
+        assert_eq!(partes.len(), 2, "sem modo headless: {linha}");
+        let depois = partes[1].trim_start();
+        assert!(
+            depois.starts_with("\"--"),
+            "depois de --print tem de vir outra flag, não o prompt: {depois}"
+        );
     }
 
     // ================================================================ M4 ===

@@ -29,7 +29,9 @@ rodando ao mesmo tempo, e publicar uma delas sem você ver uma linha de Git (M5)
 Precisa do [Claude Code](https://code.claude.com) instalado e autenticado, e do
 Git para os rascunhos. Sem qualquer um dos dois o app sobe assim mesmo — no
 adaptador falso (roteiro em vez de modelo) e sem rascunho — e **diz isso na
-barra de cima**, nunca em silêncio.
+barra de cima**, nunca em silêncio. A CLI é procurada no PATH como o console
+procuraria, então o `claude.cmd` que o npm instala no Windows é encontrado;
+`MUTIRAO_CLAUDE_BIN` continua mandando quando você quer apontar outra.
 
 ```bash
 npm install
@@ -43,8 +45,8 @@ MUTIRAO_CLAUDE_BIN=...  npm run app   # CLI fora do PATH (comum no Windows)
 Testes:
 
 ```bash
-cargo test -p nucleo        # 128 testes, offline e de graça
-node testes-ui/fumaca.mjs   # 66 verificações da interface no Chromium
+cargo test -p nucleo        # 136 testes, offline e de graça
+node testes-ui/fumaca.mjs   # 65 verificações da interface no Chromium
 
 # Estes gastam token e precisam da CLI instalada. Rode ao subir de versão dela.
 # Os do M3 ao M5 sobem VÁRIOS Claude Code, falando entre si e em rascunhos.
@@ -70,7 +72,7 @@ janela, IPC e a tradução de evento do núcleo em evento de janela. O front
 
 Essa separação existe por um motivo prático: `cargo test -p nucleo` roda em
 qualquer máquina, sem as dependências de sistema do Tauri — e é onde estão os
-128 testes, inclusive os de turno completo, os da ponte, os do time e os de rascunho.
+136 testes, inclusive os de turno completo, os da ponte, os do time e os de rascunho.
 
 O adaptador falso (`nucleo/src/agente.rs`) não é conveniência de teste: testar
 orquestração contra a API de verdade é lento, caro e não-determinístico. Ele lê

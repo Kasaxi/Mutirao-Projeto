@@ -40,7 +40,7 @@ mutirao/
 │   ├── tests/
 │   │   └── ao_vivo.rs      testes #[ignore] que rodam o Claude Code de verdade
 │   └── src/
-│       ├── lib.rs          fachada + 128 testes
+│       ├── lib.rs          fachada + 136 testes
 │       ├── modelo.rs       tipos de domínio, máquina de estados, preços
 │       ├── agente.rs       trait AgenteAdapter, Roteiro, adaptador falso
 │       ├── claude.rs       adaptador do Claude Code (CLI headless)
@@ -49,6 +49,7 @@ mutirao/
 │       ├── ferramentas.rs  as ferramentas do §6, com escopo pelos cabos
 │       ├── papeis.rs       biblioteca embutida e escada de autonomia
 │       ├── partituras.rs   fotografar e montar um time salvo
+│       ├── processo.rs     abrir processo sem piscar console, e achar no PATH
 │       ├── git.rs          o Git oculto: repo fora da pasta, merge seco
 │       ├── ensaios.rs      rascunhos: criar, trocar, publicar, descartar
 │       ├── arquivos.rs     escopo de caminho, listar, ler e gravar
@@ -82,7 +83,7 @@ mutirao/
 │       └── Cabos.tsx       SVG dos cabos
 │
 └── testes-ui/
-    ├── fumaca.mjs          66 verificações no Chromium
+    ├── fumaca.mjs          65 verificações no Chromium
     ├── canvas.png          retrato do canvas em repouso
     ├── conversa.png        retrato de um turno inteiro
     ├── aprovacao.png       o card aberto, com o turno parado atrás
@@ -119,7 +120,7 @@ npm run app                 # app de verdade (tauri dev)
 npm run build               # typecheck + build do front
 npm run app:build           # instalador MSI/NSIS
 
-cargo test -p nucleo        # 128 testes do núcleo, offline e de graça
+cargo test -p nucleo        # 136 testes do núcleo, offline e de graça
 node testes-ui/fumaca.mjs   # teste de fumaça da interface
 ```
 
@@ -684,9 +685,9 @@ Nenhuma palavra de Git aparece. Binário não faz merge: escolhe-se um lado.
 
 | Camada | Como | Cobre |
 |---|---|---|
-| Núcleo | `cargo test -p nucleo` — 128 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras, handshake do MCP, ponte entre nós, fila e os limites, papéis e escada de autonomia, recrutamento com teto, partitura ida e volta, rascunhos em paralelo, publicar com e sem conflito |
-| Interface | `node testes-ui/fumaca.mjs` — 66 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; um turno de ponta a ponta; o card de aprovação com aprovar, negar e "não perguntar de novo"; nota em arquivo e árvore da pasta; o cabo acendendo e o recado chegando ao outro nó com o nome de quem pediu; papel no cabeçalho, time salvo e reaberto com a forma que tinha; a barra de rascunhos e a tela de publicar — que é varrida atrás de palavra de Git |
-| Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` — 14 testes | o Claude Code de verdade: lê, responde, cobra, retoma, reporta erro com a frase certa, grava depois de aprovado, **não** grava quando negado, **não** grava sem barramento — e, com **dois** processos, entrega de um nó a outro e encerra a cadeia sem travar; e um prompt monta um time de quatro, com o papel mudando o que cada agente de fato faz; e dois rascunhos do mesmo trabalho guardando versões diferentes ao mesmo tempo |
+| Núcleo | `cargo test -p nucleo` — 136 testes, offline e de graça | migrations, CRUD, escopo dos cabos e dos caminhos, validação, máquina de estados, contrato de serialização, turno inteiro, custo, cancelamento, sigilo do token, tradução do stream da CLI, aprovação e regras, handshake do MCP, ponte entre nós, fila e os limites, papéis e escada de autonomia, recrutamento com teto, partitura ida e volta, rascunhos em paralelo, publicar com e sem conflito |
+| Interface | `node testes-ui/fumaca.mjs` — 65 verificações no Chromium | pan, zoom ancorado, arrastar, redimensionar, ligar, renomear, remover; um turno de ponta a ponta; o card de aprovação com aprovar, negar e "não perguntar de novo"; nota em arquivo e árvore da pasta; o cabo acendendo e o recado chegando ao outro nó com o nome de quem pediu; papel no cabeçalho, time salvo e reaberto com a forma que tinha; a barra de rascunhos e a tela de publicar — que é varrida atrás de palavra de Git |
+| Ao vivo | `cargo test -p nucleo --test ao_vivo -- --ignored` — 15 testes | o Claude Code de verdade: lê, responde, cobra, retoma, reporta erro com a frase certa, grava depois de aprovado, **não** grava quando negado, **não** grava sem barramento — e, com **dois** processos, entrega de um nó a outro e encerra a cadeia sem travar; e um prompt monta um time de quatro, com o papel mudando o que cada agente de fato faz; e dois rascunhos do mesmo trabalho guardando versões diferentes ao mesmo tempo |
 
 **Duas pastas parecidas, de propósito.** `nucleo/testes/` guarda fixtures (nome
 em português, como o resto); `nucleo/tests/` é a pasta que o Cargo exige em
@@ -746,6 +747,13 @@ Alguns testes valem por si, porque cobrem coisa que falha calada:
 - "não usa uma palavra de Git" (fumaça) — a tela de publicar é varrida atrás de
   `git`, `branch`, `commit`, `merge`, `worktree`, `rebase` e `stash`. A
   `Decisão 3` é promessa de produto, e promessa sem teste vira lembrete.
+- `no_windows_claude_do_npm_e_um_cmd_e_a_busca_acha` — o teste prova as duas
+  metades: que a busca acha o `.cmd`, e que **sem** extensão nenhuma (que é o
+  que o `CreateProcess` faz sozinho) não acha nada. A segunda metade é o que
+  torna a primeira uma correção em vez de um enfeite.
+- `prompt_de_varias_linhas_chega_inteiro` (ao vivo) — a palavra combinada está
+  na última linha do prompt. Se ela volta, o prompt atravessou inteiro; é a
+  metade que dá para provar fora do Windows.
 
 Um teste que passou merece um comentário no código quando o motivo dele não é
 óbvio. Dois exemplos já no repositório: o `overflow` do nó, que tornava a porta
@@ -921,11 +929,53 @@ com erro (error_during_execution)", que não ajuda ninguém. É o que o teste
 
 Outros dois detalhes medidos, não supostos:
 
-- **`stdin` precisa ser fechado.** Sem `Stdio::null()`, a CLI espera 3 segundos
-  por dados que nunca vêm — em todo turno.
+- **O `stdin` precisa fechar.** Enquanto ele fica aberto sem dados, a CLI espera
+  3 segundos — em todo turno. Era `Stdio::null()`; hoje é um cano por onde o
+  prompt entra e que fecha logo em seguida, ver adiante. A espera continua não
+  existindo, pelo mesmo motivo: o EOF chega.
 - **Texto intermediário não entra no histórico.** O `result` traz só a resposta
   final; a narração do meio do caminho é transmitida ao vivo pelos deltas e
   depois substituída. Os cards de ação contam o que aconteceu no intervalo.
+
+### Duas coisas que o Windows cobra, e que o Linux nunca cobraria
+
+Não são revisões do `ARQUITETURA.md` — são coisas que nenhum dos dois documentos
+previu, porque todo o código foi escrito no Linux e os dois defeitos só existem
+lá. Estão em `nucleo/src/processo.rs`, que passou a ser o **único** lugar do
+núcleo que abre processo.
+
+**1. `claude` no Windows costuma ser `claude.cmd`.** Instalada pelo npm, a CLI
+vira um `.cmd` numa pasta do npm, não um `.exe`. O `Command::new("claude")` do
+Rust chega no `CreateProcess`, que procura no PATH acrescentando `.exe` e
+**não** `.cmd` — quem resolve `.cmd` é o `cmd.exe`, que não está no caminho. O
+resultado seria a pior mensagem de erro possível: "não encontrei o Claude Code"
+com a CLI funcionando no terminal ao lado. `processo::achar` procura como o
+console procuraria, respeitando `PATHEXT`, e prefere `.EXE` a `.CMD` — quem tem
+a instalação nativa pega o executável de verdade, não o atalho do npm.
+`MUTIRAO_CLAUDE_BIN` continua mandando quando existe.
+
+**2. O prompt saiu da linha de comando e foi para o `stdin`.** É consequência do
+item 1, não escolha de estilo: programa em lote **não aceita argumento com
+quebra de linha** — o Rust recusa a chamada antes de abrir o processo —, e um
+prompt de duas linhas é o caso comum, não o raro. Some-se o teto de 32 mil
+caracteres da linha de comando do Windows, que um documento colado estoura.
+Medido na 2.1.252: `claude --print` sem prompt posicional lê o prompt do stdin,
+multilinha inclusive; `ao_vivo.rs::prompt_de_varias_linhas_chega_inteiro` guarda
+isso. O prompt é escrito por uma thread própria, pelo mesmo motivo do coletor de
+stderr: cano tem fundo, e um prompt maior que o buffer travaria o turno antes de
+ele nascer.
+
+**3. Janela de console.** O app é GUI (`windows_subsystem = "windows"`), e
+processo GUI que abre programa de console ganha um console **novo** — uma janela
+preta que aparece e some. Um time de quatro agentes pisca quatro por turno, e
+cada `git` da publicação pisca mais uma. `CREATE_NO_WINDOW` resolve, e por isso
+os seis pontos do `git.rs` e os dois do `claude.rs` passam por `processo::novo`.
+
+**O que não foi medido, e é honesto dizer:** nada disto rodou no Windows. A
+lógica da busca tem teste (`processo::procurar` recebe as extensões de fora
+justamente para o teste simular o Windows a partir do Linux), e o prompt
+multilinha tem teste ao vivo. A plataforma em si só o primeiro `npm run app`
+numa máquina Windows prova.
 
 ---
 
