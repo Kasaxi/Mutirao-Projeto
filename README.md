@@ -71,6 +71,11 @@ cargo test -p nucleo --test ao_vivo -- --ignored --nocapture
 Se o Chromium do Playwright não estiver onde ele espera (CI, contêiner),
 aponte o binário: `CHROMIUM_BIN=/caminho/para/chromium node testes-ui/fumaca.mjs`.
 
+**O Windows tem CI.** A cada push, uma máquina `windows-latest` compila, roda os
+140 testes do núcleo, faz o teste de fumaça e monta o instalador — que fica
+baixável na aba Actions. É de lá que sai o MSI, e foi ele que achou os três
+defeitos que só existiam no Windows.
+
 ## Onde ler o quê
 
 | Arquivo | Para quê |

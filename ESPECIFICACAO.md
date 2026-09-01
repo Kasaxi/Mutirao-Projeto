@@ -1035,6 +1035,30 @@ Outros dois detalhes medidos, não supostos:
   final; a narração do meio do caminho é transmitida ao vivo pelos deltas e
   depois substituída. Os cards de ação contam o que aconteceu no intervalo.
 
+### O que o Windows de verdade disse
+
+`.github/workflows/windows.yml` roda a cada push numa máquina `windows-latest`:
+typecheck, os 140 testes do núcleo, a compilação da casca, o teste de fumaça e
+o `tauri build`, que sai como MSI e NSIS baixáveis. Os testes ao vivo ficam de
+fora — precisam da chave, e a chave não entra no CI.
+
+Três defeitos apareceram na primeira vez que uma máquina Windows tocou neste
+código, e nenhum deles daria sinal aqui:
+
+1. **O Git oculto trocava a quebra de linha do arquivo do usuário.** O grave —
+   ver §5c. Quatro testes de rascunho falharam com `"\r\n"`.
+2. **O teste de fumaça abria em branco.** `new URL(...).pathname` devolve
+   `/D:/a/projeto/dist/` no Windows, com barra antes da letra do disco. Todo
+   pedido virava 404. `fileURLToPath` resolve nos dois sistemas.
+3. **O upload do instalador procurava no lugar errado.** Num workspace Cargo o
+   `target/` fica na raiz, e não em `src-tauri/`. O MSI estava pronto no disco
+   e o passo falhava mesmo assim.
+
+O primeiro é do app; os outros dois são de infraestrutura. Vale registrar a
+proporção: de tudo que foi escrito no Linux imaginando o Windows, o que quebrou
+não foi o que a gente antecipou — foi o que ninguém tinha como antecipar sem
+uma máquina de verdade.
+
 ### Duas coisas que o Windows cobra, e que o Linux nunca cobraria
 
 Não são revisões do `ARQUITETURA.md` — são coisas que nenhum dos dois documentos
