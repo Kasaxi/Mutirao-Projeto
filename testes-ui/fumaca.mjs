@@ -12,8 +12,14 @@ import { chromium } from "playwright";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const RAIZ = new URL("../dist/", import.meta.url).pathname;
+// `fileURLToPath`, e não `.pathname`. No Windows o `pathname` de um file://
+// vem como `/D:/a/projeto/dist/` — com uma barra ANTES da letra do disco —, e
+// o `join` sai com um caminho que não existe. Todo pedido vira 404, a página
+// abre em branco, e o teste falha em "não achei nenhum nó", que não diz nada
+// sobre a causa. Foi o CI do Windows que pegou.
+const RAIZ = fileURLToPath(new URL("../dist/", import.meta.url));
 const PORTA = 4173;
 
 const MIME = {
